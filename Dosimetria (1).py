@@ -28,9 +28,9 @@ TEAM_ID     = "YrsYfTegptdZcHJEj"
 DATABASE_ID = "ow1geqnkz00e"
 BASE_URL    = "https://api.ninox.com/v1"
 
-# Puedes escribir NOMBRE o ID de tabla
-DEFAULT_BASE_TABLE_ID   = "LISTA DE CODIGO"  # tabla base (participantes/códigos)
-DEFAULT_REPORT_TABLE_ID = "REPORTE"          # tabla destino para subir registros
+# Tablas: lee de LISTA DE CODIGO, sube y reporta a BASE DE DATOS
+DEFAULT_BASE_TABLE_ID   = "LISTA DE CODIGO"   # lectura: personas/códigos
+DEFAULT_REPORT_TABLE_ID = "BASE DE DATOS"     # escritura y reportes
 
 # ===================== STREAMLIT (global) =====================
 st.set_page_config(page_title="Microsievert - Dosimetría", page_icon="🧪", layout="wide")
@@ -53,7 +53,7 @@ def ninox_list_tables(team_id: str, db_id: str):
 
 def ninox_resolve_table_id(team_id: str, db_id: str, table_hint: str) -> str:
     """
-    Acepta un ID (p.ej. 'I','C','T0001') o un NOMBRE ('LISTA DE CODIGO','REPORTE')
+    Acepta un ID (p.ej. 'I','C','T0001') o un NOMBRE ('LISTA DE CODIGO','BASE DE DATOS')
     y devuelve el ID real que entiende la API.
     """
     hint = (table_hint or "").strip()
@@ -198,7 +198,7 @@ def merge_raw_lists(*vals):
             out.append(v)
     return out
 
-# ===================== Excel helpers (dos formatos) =====================
+# ===================== Excel simple VALOR-CONTROL =====================
 def exportar_excel_simple_valor_control(df_final: pd.DataFrame) -> bytes:
     wb = Workbook(); ws = wb.active; ws.title = "REPORTE DE DOSIS"
     border = Border(left=Side(style='thin'), right=Side(style='thin'),
@@ -213,7 +213,7 @@ def exportar_excel_simple_valor_control(df_final: pd.DataFrame) -> bytes:
     c.font = Font(bold=True, size=14); c.alignment = Alignment(horizontal='center')
 
     headers = [
-        'PERIODO DE LECTURA','COMPAÑÍA','CÓDIGO DE DOSÍMETRO','NOMBRE',
+        'PERIODO DE LECTURA','CLIENTE','CÓDIGO DE DOSÍMETRO','NOMBRE',
         'CÉDULA','FECHA DE LECTURA','TIPO DE DOSÍMETRO','Hp(10)','Hp(0.07)','Hp(3)'
     ]
     for i, h in enumerate(headers, 1):
@@ -283,7 +283,7 @@ def leer_dosis(upload):
 # ===================== Normalizador LISTA DE CODIGO =====================
 def normalize_lista_codigo(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    Normaliza columnas de la tabla 'LISTA DE CODIGO' según tu diseño:
+    Normaliza columnas de 'LISTA DE CODIGO':
     CÉDULA, CÓDIGO USUARIO, NOMBRE, APELLIDO, FECHA DE NACIMIENTO, CLIENTE,
     CÓDIGO_CLIENTE, ETIQUETA, CÓDIGO_DOSÍMETRO, PERIODO DE LECTURA, TIPO DE DOSÍMETRO.
     """
@@ -302,7 +302,7 @@ def normalize_lista_codigo(df_raw: pd.DataFrame) -> pd.DataFrame:
     df["NOMBRE_COMPLETO"] = (df["NOMBRE"] + " " + ap).str.strip().replace({"^$": ""}, regex=True)
 
     df["CODIGO"] = df["CÓDIGO_DOSÍMETRO"].fillna("").astype(str).str.strip().str.upper()
-    df["COMPAÑÍA"] = df["CLIENTE"].fillna("").astype(str).str.strip()
+    df["CLIENTE"] = df["CLIENTE"].fillna("").astype(str).str.strip()
     df["PERIODO_NORM"] = (
         df["PERIODO DE LECTURA"]
         .fillna("").astype(str).str.strip().str.upper()
@@ -355,7 +355,7 @@ def construir_registros_desde_lista_codigo(df_lista: pd.DataFrame,
 
         registros.append({
             "PERIODO DE LECTURA": r["PERIODO_NORM"] or "",
-            "COMPAÑÍA": r["COMPAÑÍA"],
+            "CLIENTE": r["CLIENTE"],
             "CÓDIGO DE DOSÍMETRO": cod,
             "NOMBRE": r["NOMBRE_COMPLETO"] or r["NOMBRE"],
             "CÉDULA": r["CÉDULA"],
@@ -367,6 +367,7 @@ def construir_registros_desde_lista_codigo(df_lista: pd.DataFrame,
             "_IS_CONTROL": bool(r["CONTROL_FLAG"]),
         })
 
+    # Control primero
     registros.sort(key=lambda x: (not x.get("_IS_CONTROL", False), x.get("NOMBRE","")))
     for r in registros:
         r.pop("_IS_CONTROL", None)
@@ -412,34 +413,35 @@ def aplicar_valor_menos_control(registros):
     return registros
 
 # ===================== TABS =====================
-tab1, tab2 = st.tabs(["📥 Carga, VALOR−CONTROL y Subida a Ninox", "📊 Reporte Actual / Anual / Vida (desde Ninox)"])
+tab1, tab2 = st.tabs(["📥 Carga, VALOR−CONTROL y Subida", "📊 Reporte Actual / Anual / Vida"])
 
 # ===================== TAB 1 =====================
 with tab1:
-    st.subheader("📤 Cargar archivo de Dosis y cruzar con LISTA DE CODIGO (Ninox)")
+    st.subheader("📤 Cargar archivo de Dosis ↔ LISTA DE CODIGO (Ninox) → subir a BASE DE DATOS")
 
     with st.sidebar:
         st.markdown("### ⚙️ Configuración (TAB 1)")
-        base_table_id   = st.text_input("Table ID BASE / Códigos", value=DEFAULT_BASE_TABLE_ID, key="tab1_base")
-        report_table_id = st.text_input("Table ID REPORTE", value=DEFAULT_REPORT_TABLE_ID, key="tab1_report")
+        base_table_id   = st.text_input("Tabla de lectura (personas/códigos)", value=DEFAULT_BASE_TABLE_ID, key="tab1_base")
+        report_table_id = st.text_input("Tabla de escritura (salida)", value=DEFAULT_REPORT_TABLE_ID, key="tab1_report")
         periodo_filtro  = st.text_input("Filtro PERIODO (opcional)", value="— TODOS —", key="tab1_per")
-        subir_pm_como_texto = st.checkbox("Subir 'PM' como TEXTO (si campos Hp son Texto en Ninox)", value=True, key="tab1_pm_texto")
+        subir_pm_como_texto = st.checkbox("Subir 'PM' como TEXTO (si Hp son texto en Ninox)", value=True, key="tab1_pm_texto")
         debug_uno = st.checkbox("Enviar 1 registro (debug)", value=False, key="tab1_debug")
         show_tables = st.checkbox("Mostrar tablas Ninox (debug)", value=False, key="tab1_show")
 
+    # Leer LISTA DE CODIGO
     try:
         if show_tables:
             st.expander("Tablas Ninox (debug)").json(ninox_list_tables(TEAM_ID, DATABASE_ID))
         df_lista_raw = ninox_fetch_records(TEAM_ID, DATABASE_ID, base_table_id)
         if df_lista_raw.empty:
-            st.warning("No hay datos en la tabla base.")
+            st.warning("No hay datos en LISTA DE CODIGO.")
             df_participantes = None
         else:
             df_participantes = normalize_lista_codigo(df_lista_raw)
-            st.success(f"Conectado a Ninox. Tabla base: {base_table_id}")
+            st.success(f"Conectado a Ninox. Tabla: {base_table_id}")
             st.dataframe(df_participantes.head(15), use_container_width=True)
     except Exception as e:
-        st.error(f"Error leyendo tabla base: {e}")
+        st.error(f"Error leyendo {base_table_id}: {e}")
         df_participantes = None
 
     st.markdown("#### Archivo de Dosis")
@@ -459,7 +461,7 @@ with tab1:
 
     if btn_proc:
         if df_participantes is None or df_participantes.empty:
-            st.error("No hay filas en LISTA DE CODIGO desde Ninox.")
+            st.error("No hay filas en LISTA DE CODIGO.")
         elif df_dosis is None or df_dosis.empty:
             st.error("No hay datos de dosis.")
         elif 'dosimeter' not in df_dosis.columns:
@@ -475,6 +477,7 @@ with tab1:
                     registros = aplicar_valor_menos_control(registros)
                     df_final = pd.DataFrame(registros)
 
+                    # Limpieza
                     df_final['PERIODO DE LECTURA'] = (
                         df_final['PERIODO DE LECTURA'].astype(str)
                         .str.replace(r'\.+$', '', regex=True).str.strip()
@@ -503,12 +506,13 @@ with tab1:
                         st.error(f"No se pudo generar Excel: {e}")
 
     st.markdown("---")
-    st.subheader("⬆️ Subir TODO a Ninox (tabla REPORTE)")
+    st.subheader("⬆️ Subir TODO a Ninox (tabla BASE DE DATOS)")
 
+    # Mapa para escribir en Ninox (asegúrate de que CÓDIGO_DOSÍMETRO existe con guion bajo)
     CUSTOM_MAP = {
         "PERIODO DE LECTURA": "PERIODO DE LECTURA",
-        "COMPAÑÍA": "COMPAÑÍA",
-        "CÓDIGO DE DOSÍMETRO": "CÓDIGO DE DOSÍMETRO",
+        "CLIENTE": "CLIENTE",
+        "CÓDIGO DE DOSÍMETRO": "CÓDIGO_DOSÍMETRO",
         "NOMBRE": "NOMBRE",
         "CÉDULA": "CÉDULA",
         "FECHA DE LECTURA": "FECHA DE LECTURA",
@@ -535,15 +539,15 @@ with tab1:
             return v.strftime("%Y-%m-%d %H:%M:%S")
         return str(v)
 
-    if st.button("Subir TODO a Ninox (tabla REPORTE)", key="tab1_btn_upload"):
+    if st.button("Subir TODO a Ninox (tabla BASE DE DATOS)", key="tab1_btn_upload"):
         df_final = st.session_state.df_final
         if df_final is None or df_final.empty:
             st.error("Primero pulsa 'Procesar'.")
         else:
             try:
-                ninox_fields = ninox_get_table_fields(TEAM_ID, DATABASE_ID, report_table_id)
+                ninox_fields = ninox_get_table_fields(TEAM_ID, DATABASE_ID, DEFAULT_REPORT_TABLE_ID)
                 if not ninox_fields:
-                    st.warning("No pude leer los campos de la tabla en Ninox. Verifica el ID de tabla.")
+                    st.warning("No pude leer los campos de la tabla en Ninox. Verifica el nombre/ID.")
             except Exception as e:
                 st.error(f"No se pudo leer el esquema de la tabla Ninox: {e}")
                 ninox_fields = set()
@@ -573,15 +577,15 @@ with tab1:
                 st.json(rows[:1])
 
             with st.spinner("Subiendo a Ninox..."):
-                res = ninox_insert_records(TEAM_ID, DATABASE_ID, report_table_id, rows, batch_size=300)
+                res = ninox_insert_records(TEAM_ID, DATABASE_ID, DEFAULT_REPORT_TABLE_ID, rows, batch_size=300)
 
             if res.get("ok"):
                 st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s).")
                 if skipped_cols:
                     st.info("Columnas omitidas por no existir en Ninox:\n- " + "\n- ".join(sorted(skipped_cols)))
                 try:
-                    df_check = ninox_fetch_records(TEAM_ID, DATABASE_ID, report_table_id)
-                    st.caption("Contenido reciente en REPORTE:")
+                    df_check = ninox_fetch_records(TEAM_ID, DATABASE_ID, DEFAULT_REPORT_TABLE_ID)
+                    st.caption("Contenido reciente en BASE DE DATOS:")
                     st.dataframe(df_check.tail(len(rows)), use_container_width=True)
                 except Exception:
                     pass
@@ -592,6 +596,8 @@ with tab1:
 
 # ===================== TAB 2 =====================
 with tab2:
+    st.subheader("📊 Reporte — Actual, Anual y de por Vida (por persona) desde Ninox BASE DE DATOS")
+
     # ---- Helpers internos de TAB 2 ----
     def fetch_all_records(table_hint: str, page_size: int = 1000):
         table_id = ninox_resolve_table_id(TEAM_ID, DATABASE_ID, table_hint)
@@ -614,18 +620,20 @@ with tab2:
             rows.append({
                 "_id": r.get("id"),
                 "PERIODO DE LECTURA": f.get("PERIODO DE LECTURA"),
-                "COMPAÑÍA": f.get("COMPAÑÍA"),
-                "CÓDIGO DE DOSÍMETRO": str(f.get("CÓDIGO DE DOSÍMETRO") or "").strip(),
+                "CLIENTE": f.get("CLIENTE"),
+                "CÓDIGO DE DOSÍMETRO": str(
+                    f.get("CÓDIGO_DOSÍMETRO") or f.get("CÓDIGO DE DOSÍMETRO") or ""
+                ).strip(),
                 "NOMBRE": f.get("NOMBRE"),
                 "CÉDULA": f.get("CÉDULA"),
                 "FECHA DE LECTURA": f.get("FECHA DE LECTURA"),
                 "TIPO DE DOSÍMETRO": f.get("TIPO DE DOSÍMETRO"),
                 "Hp10_RAW":  as_value(f.get("Hp (10)")),
                 "Hp007_RAW": as_value(f.get("Hp (0.07)")),
-                "Hp3_RAW":  as_value(f.get("Hp (3)")),
+                "Hp3_RAW":   as_value(f.get("Hp (3)")),
                 "Hp10_NUM":  as_num(f.get("Hp (10)")),
                 "Hp007_NUM": as_num(f.get("Hp (0.07)")),
-                "Hp3_NUM":  as_num(f.get("Hp (3)")),
+                "Hp3_NUM":   as_num(f.get("Hp (3)")),
             })
         df = pd.DataFrame(rows)
         df["FECHA_DE_LECTURA_DT"] = pd.to_datetime(
@@ -642,26 +650,17 @@ with tab2:
         try: return pd.to_datetime(dtval).strftime("%d/%m/%Y %H:%M")
         except Exception: return str(dtval)
 
-    st.subheader("📊 Reporte — Actual, Anual y de por Vida (por persona) desde Ninox REPORTE")
-
-    with st.sidebar:
-        st.markdown("### ⚙️ Configuración (TAB 2)")
-        header_line1 = st.text_input("Encabezado Excel — Línea 1", "MICROSIEVERT, S.A.", key="tab2_h1")
-        header_line2 = st.text_input("Encabezado Excel — Línea 2", "PH Conardo", key="tab2_h2")
-        header_line3 = st.text_input("Encabezado Excel — Línea 3", "Calle 41 Este, Panamá", key="tab2_h3")
-        header_line4 = st.text_input("Encabezado Excel — Línea 4", "PANAMÁ", key="tab2_h4")
-        logo_file = st.file_uploader("Logo (PNG/JPG) opcional", type=["png","jpg","jpeg"], key="tab2_logo")
-
-    with st.spinner("Cargando datos desde Ninox (REPORTE)…"):
+    # Lee la tabla de salida (BASE DE DATOS) para los reportes
+    with st.spinner("Cargando datos desde Ninox (BASE DE DATOS)…"):
         base_records = fetch_all_records(DEFAULT_REPORT_TABLE_ID)
         base = normalize_df(base_records)
 
     if base.empty:
-        st.warning("No hay registros en la tabla REPORTE.")
+        st.warning("No hay registros en la tabla BASE DE DATOS.")
         st.stop()
 
     with st.sidebar:
-        st.markdown("---")
+        st.markdown("### ⚙️ Configuración (TAB 2)")
         per_order = (base.groupby("PERIODO DE LECTURA")["FECHA_DE_LECTURA_DT"].max()
                     .sort_values(ascending=False).index.astype(str).tolist())
         per_valid = [p for p in per_order if p.strip().upper() != "CONTROL"]
@@ -674,22 +673,23 @@ with tab2:
             [p for p in per_valid if p != periodo_actual],
             default=[per_valid[1]] if (len(per_valid) > 1) else [], key="tab2_prev"
         )
-        comp_opts = ["(todas)"] + sorted(base["COMPAÑÍA"].dropna().astype(str).unique().tolist())
-        compania = st.selectbox("Compañía", comp_opts, index=0, key="tab2_comp")
+        comp_opts = ["(todas)"] + sorted(base["CLIENTE"].dropna().astype(str).unique().tolist())
+        compania = st.selectbox("Cliente", comp_opts, index=0, key="tab2_comp")
         tipo_opts = ["(todos)"] + sorted(base["TIPO DE DOSÍMETRO"].dropna().astype(str).unique().tolist())
         tipo = st.selectbox("Tipo de dosímetro", tipo_opts, index=0, key="tab2_tipo")
 
-        files = st.file_uploader("Archivos de dosis (para filtrar por CÓDIGO DE DOSÍMETRO) — Opcional", type=["csv","xlsx","xls"], accept_multiple_files=True, key="tab2_codes")
+        files = st.file_uploader("Archivos de dosis (para filtrar por CÓDIGO DE DOSÍMETRO) — Opcional",
+                                 type=["csv","xlsx","xls"], accept_multiple_files=True, key="tab2_codes")
 
-    # Filtro compañía/tipo
+    # Filtro cliente/tipo
     df_company_type = base.copy()
     if compania != "(todas)":
-        df_company_type = df_company_type[df_company_type["COMPAÑÍA"].astype(str) == compania]
+        df_company_type = df_company_type[df_company_type["CLIENTE"].astype(str) == compania]
     if tipo != "(todos)":
         df_company_type = df_company_type[df_company_type["TIPO DE DOSÍMETRO"].astype(str) == tipo]
 
     if df_company_type.empty:
-        st.warning("No hay registros que cumplan los filtros de Compañía y/o Tipo de dosímetro.")
+        st.warning("No hay registros que cumplan los filtros de Cliente y/o Tipo de dosímetro.")
         st.stop()
 
     # Leer códigos (opcional) para filtrar
@@ -752,7 +752,7 @@ with tab2:
     # ACTUAL
     gb_curr_sum = df_curr.groupby(keys, as_index=False).agg({
         "PERIODO DE LECTURA": "last",
-        "COMPAÑÍA": "last",
+        "CLIENTE": "last",
         "CÓDIGO DE DOSÍMETRO": "last",
         "NOMBRE": "last",
         "CÉDULA": "last",
@@ -897,7 +897,7 @@ with tab2:
     out = out.sort_values(["__is_control","NOMBRE","CÉDULA"], ascending=[False, True, True])
 
     FINAL_COLS = [
-        "PERIODO DE LECTURA","COMPAÑÍA","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+        "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
         "FECHA Y HORA DE LECTURA","TIPO DE DOSÍMETRO",
         "Hp (10) ACTUAL","Hp (0.07) ACTUAL","Hp (3) ACTUAL",
         "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
@@ -934,13 +934,6 @@ with tab2:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="tab2_dl_xlsx_simple"
     )
-
-    # (Opcional) Excel formato plantilla: si más adelante quieres reactivar tu versión con logos,
-    # vuelve a colocar tu función build_formatted_excel y el botón de descarga.
-
-
-
-
 
 
 
