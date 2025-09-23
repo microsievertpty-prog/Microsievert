@@ -22,9 +22,9 @@ except Exception:
     ImageFont = None
 
 # ===================== NINOX CONFIG =====================
-API_TOKEN   = "0b3a1130-785a-11f0-ace0-3fb1fcb242e2"   # <-- tu API key
-TEAM_ID     = "ihp8o8AaLzfodwc4J"
-DATABASE_ID = "ksqzvuts5aq0"
+API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"   
+TEAM_ID     = "YrsYfTegptdZcHJEj"
+DATABASE_ID = "ow1geqnkz00e"
 BASE_URL    = "https://api.ninox.com/v1"
 
 # IDs por defecto
@@ -1125,4 +1125,5 @@ with tab2:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="tab2_dl_xlsx_fmt"
     )
+
 
