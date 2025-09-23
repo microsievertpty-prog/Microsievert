@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import io
 import re
 import requests
@@ -22,14 +23,14 @@ except Exception:
     ImageFont = None
 
 # ===================== NINOX CONFIG =====================
-API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"   
+API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"
 TEAM_ID     = "YrsYfTegptdZcHJEj"
 DATABASE_ID = "ow1geqnkz00e"
 BASE_URL    = "https://api.ninox.com/v1"
 
-# IDs por defecto
-DEFAULT_BASE_TABLE_ID   = "J"   # BASE DE DATOS
-DEFAULT_REPORT_TABLE_ID = "C"   # REPORTE
+# Puedes escribir NOMBRE o ID de tabla
+DEFAULT_BASE_TABLE_ID   = "LISTA DE CODIGO"  # tabla base (participantes/códigos)
+DEFAULT_REPORT_TABLE_ID = "REPORTE"          # tabla destino para subir registros
 
 # ===================== STREAMLIT (global) =====================
 st.set_page_config(page_title="Microsievert - Dosimetría", page_icon="🧪", layout="wide")
@@ -39,7 +40,7 @@ st.caption("Ninox + Procesamiento VALOR − CONTROL + Reporte Actual/Anual/Vida 
 if "df_final" not in st.session_state:
     st.session_state.df_final = None
 
-# ===================== Ninox helpers (compartidos) =====================
+# ===================== Ninox helpers =====================
 def ninox_headers():
     return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
@@ -50,24 +51,68 @@ def ninox_list_tables(team_id: str, db_id: str):
     r.raise_for_status()
     return r.json()
 
+def ninox_resolve_table_id(team_id: str, db_id: str, table_hint: str) -> str:
+    """
+    Acepta un ID (p.ej. 'I','C','T0001') o un NOMBRE ('LISTA DE CODIGO','REPORTE')
+    y devuelve el ID real que entiende la API.
+    """
+    hint = (table_hint or "").strip()
+    # Heurística: si no tiene espacios y es corto, probablemente ya es un ID
+    if hint and " " not in hint and len(hint) <= 8:
+        return hint
+    # Buscar por nombre (case-insensitive)
+    for t in ninox_list_tables(team_id, db_id):
+        tname = str(t.get("name", "")).strip().lower()
+        tid   = str(t.get("id", "")).strip()
+        if tname == hint.lower() or tid == hint:
+            return tid
+    # Devolver lo que vino (dejar que la API genere un error claro)
+    return hint
+
 @st.cache_data(ttl=300, show_spinner=False)
-def ninox_fetch_records(team_id: str, db_id: str, table_id: str, per_page: int = 1000):
-    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
-    out, offset = [], 0
-    while True:
-        r = requests.get(url, headers=ninox_headers(), params={"perPage": per_page, "offset": offset}, timeout=60)
-        r.raise_for_status()
-        batch = r.json()
-        if not batch: break
-        out.extend(batch)
-        if len(batch) < per_page: break
-        offset += per_page
+def ninox_fetch_records(team_id: str, db_id: str, table_hint: str, page_size: int = 1000) -> pd.DataFrame:
+    """
+    Lee todos los registros de una tabla Ninox (por ID o nombre) y devuelve un DataFrame de 'fields'.
+    Usa limit/skip y cae a perPage/offset si es necesario.
+    """
+    table_id = ninox_resolve_table_id(team_id, db_id, table_hint)
+    base = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
+    out = []
+    # Ruta principal: limit/skip
+    try:
+        skip = 0
+        while True:
+            r = requests.get(base, headers=ninox_headers(), params={"limit": page_size, "skip": skip}, timeout=60)
+            if r.status_code == 404:
+                raise FileNotFoundError(f"Tabla '{table_hint}' (ID resuelto '{table_id}') no existe en Ninox.")
+            r.raise_for_status()
+            chunk = r.json()
+            if not chunk: break
+            out.extend(chunk)
+            if len(chunk) < page_size: break
+            skip += page_size
+    except FileNotFoundError:
+        raise
+    except Exception:
+        # Fallback: perPage/offset
+        offset = 0
+        while True:
+            r = requests.get(base, headers=ninox_headers(), params={"perPage": page_size, "offset": offset}, timeout=60)
+            if r.status_code == 404:
+                raise FileNotFoundError(f"Tabla '{table_hint}' (ID resuelto '{table_id}') no existe en Ninox.")
+            r.raise_for_status()
+            batch = r.json()
+            if not batch: break
+            out.extend(batch)
+            if len(batch) < page_size: break
+            offset += page_size
     rows = [x.get("fields", {}) for x in out]
     df = pd.DataFrame(rows) if rows else pd.DataFrame()
-    df.columns = [str(c) for c in df.columns]  # conservar acentos/espacios
+    df.columns = [str(c) for c in df.columns]
     return df
 
-def ninox_insert_records(team_id: str, db_id: str, table_id: str, rows: list, batch_size: int = 400):
+def ninox_insert_records(team_id: str, db_id: str, table_hint: str, rows: list, batch_size: int = 400):
+    table_id = ninox_resolve_table_id(team_id, db_id, table_hint)
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
     n = len(rows)
     if n == 0:
@@ -82,8 +127,9 @@ def ninox_insert_records(team_id: str, db_id: str, table_id: str, rows: list, ba
     return {"ok": True, "inserted": inserted}
 
 @st.cache_data(ttl=120, show_spinner=False)
-def ninox_get_table_fields(team_id: str, db_id: str, table_id: str):
+def ninox_get_table_fields(team_id: str, db_id: str, table_hint: str):
     """Devuelve el conjunto de nombres de campos existentes en la tabla Ninox."""
+    table_id = ninox_resolve_table_id(team_id, db_id, table_hint)
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
     r = requests.get(url, headers=ninox_headers(), timeout=30)
     r.raise_for_status()
@@ -99,11 +145,10 @@ def ninox_get_table_fields(team_id: str, db_id: str, table_id: str):
             break
     return fields
 
-# ===================== Utilidades genéricas =====================
+# ===================== Utilidades varias =====================
 def round2(x: float) -> float:
     return float(f"{x:.2f}")
 
-# --------- Helpers para reporte (parte 2) ---------
 def as_value(v: Any):
     if v is None: return ""
     s = str(v).strip().replace(",", ".")
@@ -153,99 +198,45 @@ def merge_raw_lists(*vals):
             out.append(v)
     return out
 
-def fetch_all_records(table_id: str, page_size: int = 1000):
-    # versión usada en parte 2 (usa limit/skip de la otra ruta)
-    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
-    skip, out = 0, []
-    while True:
-        r = requests.get(url, headers=ninox_headers(), params={"limit": page_size, "skip": skip}, timeout=60)
-        r.raise_for_status()
-        chunk = r.json()
-        if not chunk: break
-        out.extend(chunk)
-        if len(chunk) < page_size: break
-        skip += page_size
-    return out
+# ===================== Excel helpers (dos formatos) =====================
+def exportar_excel_simple_valor_control(df_final: pd.DataFrame) -> bytes:
+    wb = Workbook(); ws = wb.active; ws.title = "REPORTE DE DOSIS"
+    border = Border(left=Side(style='thin'), right=Side(style='thin'),
+                    top=Side(style='thin'),  bottom=Side(style='thin'))
 
-def normalize_df(records):
-    rows = []
-    for r in records:
-        f = r.get("fields", {}) or {}
-        rows.append({
-            "_id": r.get("id"),
-            "PERIODO DE LECTURA": f.get("PERIODO DE LECTURA"),
-            "COMPAÑÍA": f.get("COMPAÑÍA"),
-            "CÓDIGO DE DOSÍMETRO": str(f.get("CÓDIGO DE DOSÍMETRO") or "").strip(),
-            "NOMBRE": f.get("NOMBRE"),
-            "CÉDULA": f.get("CÉDULA"),
-            "FECHA DE LECTURA": f.get("FECHA DE LECTURA"),
-            "TIPO DE DOSÍMETRO": f.get("TIPO DE DOSÍMETRO"),
-            "Hp10_RAW":  as_value(f.get("Hp (10)")),
-            "Hp007_RAW": as_value(f.get("Hp (0.07)")),
-            "Hp3_RAW":  as_value(f.get("Hp (3)")),
-            "Hp10_NUM":  as_num(f.get("Hp (10)")),
-            "Hp007_NUM": as_num(f.get("Hp (0.07)")),
-            "Hp3_NUM":  as_num(f.get("Hp (3)")),
-        })
-    df = pd.DataFrame(rows)
-    df["FECHA_DE_LECTURA_DT"] = pd.to_datetime(
-        df["FECHA DE LECTURA"].apply(
-            lambda x: dtparse(str(x), dayfirst=True) if pd.notna(x) and str(x).strip() != "" else pd.NaT
-        ), errors="coerce"
-    )
-    df["NOMBRE_NORM"] = df["NOMBRE"].fillna("").astype(str).str.strip()
-    df["CÉDULA_NORM"] = df["CÉDULA"].fillna("").astype(str).str.strip()
-    return df
+    ws['I1'] = f"Fecha de emisión: {datetime.now().strftime('%d/%m/%Y')}"
+    ws['I1'].font = Font(size=10, italic=True)
+    ws['I1'].alignment = Alignment(horizontal='right', vertical='top')
 
-def col_pixels(ws, col_letter: str) -> int:
-    w = ws.column_dimensions[col_letter].width
-    if w is None: w = 8.43
-    return int(w * 7 + 5)
+    ws.merge_cells('A5:J5')
+    c = ws['A5']; c.value = 'REPORTE DE DOSIMETRÍA'
+    c.font = Font(bold=True, size=14); c.alignment = Alignment(horizontal='center')
 
-def row_pixels(ws, row_idx: int) -> int:
-    h = ws.row_dimensions[row_idx].height
-    if h is None: h = 15
-    return int(h * 96 / 72)
+    headers = [
+        'PERIODO DE LECTURA','COMPAÑÍA','CÓDIGO DE DOSÍMETRO','NOMBRE',
+        'CÉDULA','FECHA DE LECTURA','TIPO DE DOSÍMETRO','Hp(10)','Hp(0.07)','Hp(3)'
+    ]
+    for i, h in enumerate(headers, 1):
+        cell = ws.cell(row=7, column=i, value=h)
+        cell.font = Font(bold=True); cell.alignment = Alignment(horizontal='center')
+        cell.fill = PatternFill('solid', fgColor='DDDDDD'); cell.border = border
 
-def fit_logo(ws, logo_bytes: bytes, top_left: str = "C1", bottom_right: str = "F4", padding: int = 6):
-    if not logo_bytes:
-        return
-    img = XLImage(BytesIO(logo_bytes))
-    def parse_cell(cell_ref: str):
-        letters = ''.join([c for c in cell_ref if c.isalpha()]) or "A"
-        digits  = ''.join([c for c in cell_ref if c.isdigit()]) or "1"
-        col_idx = column_index_from_string(letters.upper())
-        row_idx = int(digits)
-        return col_idx, row_idx
-    tl_col, tl_row = parse_cell(top_left)
-    br_col, br_row = parse_cell(bottom_right)
-    if br_col < tl_col: tl_col, br_col = br_col, tl_col
-    if br_row < tl_row: tl_row, br_row = br_row, tl_row
-    box_w = sum(col_pixels(ws, get_column_letter(c)) for c in range(tl_col, br_col + 1))
-    box_h = sum(row_pixels(ws, r) for r in range(tl_row, br_row + 1))
-    max_w = max(10, box_w - 2 * padding)
-    max_h = max(10, box_h - 2 * padding)
-    try:
-        scale = min(max_w / float(img.width), max_h / float(img.height), 1.0)
-    except Exception:
-        scale = 1.0
-    img.width  = int(img.width  * scale)
-    img.height = int(img.height * scale)
-    img.anchor = top_left
-    ws.add_image(img)
+    start = 8
+    for ridx, (_, row) in enumerate(df_final.iterrows()):
+        for cidx, h in enumerate(headers, 1):
+            val = row.get(h, "")
+            cell = ws.cell(row=start + ridx, column=cidx, value=val)
+            cell.alignment = Alignment(horizontal='center', wrap_text=True)
+            cell.font = Font(size=10); cell.border = border
 
-def sample_logo_bytes(text="µSv  MICROSIEVERT, S.A."):
-    if PILImage is None or ImageDraw is None or ImageFont is None: return None
-    img = PILImage.new("RGBA", (420, 110), (255, 255, 255, 0))
-    d = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("arial.ttf", 36)
-    except Exception:
-        font = ImageFont.load_default()
-    d.text((12, 30), text, fill=(0, 70, 140, 255), font=font)
-    bio = BytesIO(); img.save(bio, format="PNG"); return bio.getvalue()
+    for col in ws.columns:
+        mx = max(len(str(c.value)) if c.value else 0 for c in col) + 2
+        ws.column_dimensions[get_column_letter(col[0].column)].width = mx
 
-# ===================== Dosis (parte 1) =====================
+    bio = io.BytesIO(); wb.save(bio); bio.seek(0)
+    return bio.read()
+
+# ===================== Lectura de dosis (archivo) =====================
 def leer_dosis(upload):
     if not upload:
         return None
@@ -289,6 +280,99 @@ def leer_dosis(upload):
 
     return df
 
+# ===================== Normalizador LISTA DE CODIGO =====================
+def normalize_lista_codigo(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza columnas de la tabla 'LISTA DE CODIGO' según tu diseño:
+    CÉDULA, CÓDIGO USUARIO, NOMBRE, APELLIDO, FECHA DE NACIMIENTO, CLIENTE,
+    CÓDIGO_CLIENTE, ETIQUETA, CÓDIGO_DOSÍMETRO, PERIODO DE LECTURA, TIPO DE DOSÍMETRO.
+    """
+    df = df_raw.copy()
+    needed = [
+        "CÉDULA","CÓDIGO USUARIO","NOMBRE","APELLIDO","FECHA DE NACIMIENTO",
+        "CLIENTE","CÓDIGO_CLIENTE","ETIQUETA","CÓDIGO_DOSÍMETRO",
+        "PERIODO DE LECTURA","TIPO DE DOSÍMETRO"
+    ]
+    for c in needed:
+        if c not in df.columns:
+            df[c] = ""
+
+    df["NOMBRE"] = df["NOMBRE"].fillna("").astype(str).str.strip()
+    ap = df["APELLIDO"].fillna("").astype(str).str.strip()
+    df["NOMBRE_COMPLETO"] = (df["NOMBRE"] + " " + ap).str.strip().replace({"^$": ""}, regex=True)
+
+    df["CODIGO"] = df["CÓDIGO_DOSÍMETRO"].fillna("").astype(str).str.strip().str.upper()
+    df["COMPAÑÍA"] = df["CLIENTE"].fillna("").astype(str).str.strip()
+    df["PERIODO_NORM"] = (
+        df["PERIODO DE LECTURA"]
+        .fillna("").astype(str).str.strip().str.upper()
+        .str.replace(r"\.+$", "", regex=True)
+    )
+    def is_control_row(r):
+        for k in ["ETIQUETA","NOMBRE","CÉDULA","CÓDIGO USUARIO"]:
+            v = str(r.get(k, "")).strip().upper()
+            if v == "CONTROL":
+                return True
+        return False
+    df["CONTROL_FLAG"] = df.apply(is_control_row, axis=1)
+    df["TIPO DE DOSÍMETRO"] = df["TIPO DE DOSÍMETRO"].fillna("").astype(str).str.strip()
+    df["CÉDULA"] = df["CÉDULA"].fillna("").astype(str).str.strip()
+    return df
+
+# ===================== Construcción de registros (desde LISTA DE CODIGO) =====================
+def construir_registros_desde_lista_codigo(df_lista: pd.DataFrame,
+                                           df_dosis: pd.DataFrame,
+                                           periodo_filtro: str = "— TODOS —") -> List[Dict[str, Any]]:
+    per_f = (periodo_filtro or "").strip().upper()
+    if per_f and per_f not in ("— TODOS —", "TODOS", "TODAS"):
+        base = df_lista[df_lista["PERIODO_NORM"] == per_f].copy()
+    else:
+        base = df_lista.copy()
+
+    df_d = df_dosis.copy()
+    df_d["dosimeter"] = df_d["dosimeter"].astype(str).str.strip().str.upper()
+    idx = df_d.set_index("dosimeter")
+
+    registros = []
+    base = pd.concat([base[base["CONTROL_FLAG"]], base[~base["CONTROL_FLAG"]]], ignore_index=True)
+
+    for _, r in base.iterrows():
+        cod = r["CODIGO"]
+        if not cod or cod.lower() == "nan":
+            continue
+        if cod not in idx.index:
+            continue
+
+        d = idx.loc[cod]
+        if isinstance(d, pd.DataFrame):
+            d = d.sort_values(by="timestamp").iloc[-1]
+
+        ts = d.get("timestamp", pd.NaT)
+        try:
+            fecha_str = pd.to_datetime(ts).strftime("%d/%m/%Y %H:%M") if pd.notna(ts) else ""
+        except Exception:
+            fecha_str = ""
+
+        registros.append({
+            "PERIODO DE LECTURA": r["PERIODO_NORM"] or "",
+            "COMPAÑÍA": r["COMPAÑÍA"],
+            "CÓDIGO DE DOSÍMETRO": cod,
+            "NOMBRE": r["NOMBRE_COMPLETO"] or r["NOMBRE"],
+            "CÉDULA": r["CÉDULA"],
+            "FECHA DE LECTURA": fecha_str,
+            "TIPO DE DOSÍMETRO": r["TIPO DE DOSÍMETRO"] or "CE",
+            "Hp(10)": float(d.get("hp10dose", 0.0) or 0.0),
+            "Hp(0.07)": float(d.get("hp0.07dose", 0.0) or 0.0),
+            "Hp(3)": float(d.get("hp3dose", 0.0) or 0.0),
+            "_IS_CONTROL": bool(r["CONTROL_FLAG"]),
+        })
+
+    registros.sort(key=lambda x: (not x.get("_IS_CONTROL", False), x.get("NOMBRE","")))
+    for r in registros:
+        r.pop("_IS_CONTROL", None)
+    return registros
+
+# ===================== Valor - Control =====================
 def periodo_desde_fecha(periodo_str: str, fecha_str: str) -> str:
     per = (periodo_str or "").strip().upper()
     per = re.sub(r'\.+$', '', per).strip()
@@ -307,52 +391,6 @@ def periodo_desde_fecha(periodo_str: str, fecha_str: str) -> str:
     except Exception:
         return per or ""
 
-def construir_registros(dfp, dfd, periodo_filtro="— TODOS —"):
-    registros = []
-    needed = ["NOMBRE","APELLIDO","CÉDULA","COMPAÑÍA"] + \
-             [f"DOSIMETRO {i}" for i in range(1,6)] + \
-             [f"PERIODO {i}" for i in range(1,6)]
-    for c in needed:
-        if c not in dfp.columns: dfp[c] = ""
-
-    for _, fila in dfp.iterrows():
-        nombre_raw = f"{str(fila.get('NOMBRE','')).strip()} {str(fila.get('APELLIDO','')).strip()}".strip()
-        for i in range(1, 6):
-            cod = str(fila.get(f'DOSIMETRO {i}', '')).strip().upper()
-            per = str(fila.get(f'PERIODO {i}', '')).upper()
-            if not cod or cod == "NAN": continue
-
-            periodo_i = "CONTROL" if re.match(r'^\s*CONTROL\b', per) else re.sub(r'\.+', '.', per).strip()
-
-            pf = (periodo_filtro or "").strip().upper()
-            if pf not in ("", "— TODOS —") and periodo_i != pf:
-                continue
-
-            row = dfd.loc[dfd['dosimeter'] == cod]
-            if row.empty: continue
-
-            r0 = row.iloc[0]
-            fecha = r0.get('timestamp', pd.NaT)
-            fecha_str = ""
-            try:
-                if pd.notna(fecha): fecha_str = pd.to_datetime(fecha).strftime('%d/%m/%Y %H:%M')
-            except Exception:
-                fecha_str = ""
-
-            registros.append({
-                'PERIODO DE LECTURA': periodo_i,
-                'COMPAÑÍA': fila.get('COMPAÑÍA',''),
-                'CÓDIGO DE DOSÍMETRO': cod,
-                'NOMBRE': nombre_raw,
-                'CÉDULA': fila.get('CÉDULA',''),
-                'FECHA DE LECTURA': fecha_str,
-                'TIPO DE DOSÍMETRO': 'CE',
-                'Hp(10)': float(r0.get('hp10dose', 0.0)),
-                'Hp(0.07)': float(r0.get('hp0.07dose', 0.0)),
-                'Hp(3)': float(r0.get('hp3dose', 0.0))
-            })
-    return registros
-
 def aplicar_valor_menos_control(registros):
     if not registros: return registros
     base10 = float(registros[0]['Hp(10)'])
@@ -363,289 +401,26 @@ def aplicar_valor_menos_control(registros):
             r.get('PERIODO DE LECTURA', ''), r.get('FECHA DE LECTURA', '')
         )
         if i == 0:
-            r['NOMBRE']  = "CONTROL"
-            r['Hp(10)']  = f"{base10:.2f}"
+            r['NOMBRE']   = "CONTROL"
+            r['Hp(10)']   = f"{base10:.2f}"
             r['Hp(0.07)'] = f"{base07:.2f}"
-            r['Hp(3)']   = f"{base3:.2f}"
+            r['Hp(3)']    = f"{base3:.2f}"
         else:
             for key, base in [('Hp(10)', base10), ('Hp(0.07)', base07), ('Hp(3)', base3)]:
                 diff = float(r[key]) - base
                 r[key] = "PM" if diff < 0.005 else f"{diff:.2f}"
     return registros
 
-def exportar_excel_simple_valor_control(df_final: pd.DataFrame) -> bytes:
-    wb = Workbook(); ws = wb.active; ws.title = "REPORTE DE DOSIS"
-    border = Border(left=Side(style='thin'), right=Side(style='thin'),
-                    top=Side(style='thin'),  bottom=Side(style='thin'))
-
-    ws['I1'] = f"Fecha de emisión: {datetime.now().strftime('%d/%m/%Y')}"
-    ws['I1'].font = Font(size=10, italic=True)
-    ws['I1'].alignment = Alignment(horizontal='right', vertical='top')
-
-    ws.merge_cells('A5:J5')
-    c = ws['A5']; c.value = 'REPORTE DE DOSIMETRÍA'
-    c.font = Font(bold=True, size=14); c.alignment = Alignment(horizontal='center')
-
-    headers = [
-        'PERIODO DE LECTURA','COMPAÑÍA','CÓDIGO DE DOSÍMETRO','NOMBRE',
-        'CÉDULA','FECHA DE LECTURA','TIPO DE DOSÍMETRO','Hp(10)','Hp(0.07)','Hp(3)'
-    ]
-    for i, h in enumerate(headers, 1):
-        cell = ws.cell(row=7, column=i, value=h)
-        cell.font = Font(bold=True); cell.alignment = Alignment(horizontal='center')
-        cell.fill = PatternFill('solid', fgColor='DDDDDD'); cell.border = border
-
-    start = 8
-    for ridx, (_, row) in enumerate(df_final.iterrows()):
-        for cidx, h in enumerate(headers, 1):
-            val = row.get(h, "")
-            cell = ws.cell(row=start + ridx, column=cidx, value=val)
-            cell.alignment = Alignment(horizontal='center', wrap_text=True)
-            cell.font = Font(size=10); cell.border = border
-
-    for col in ws.columns:
-        mx = max(len(str(c.value)) if c.value else 0 for c in col) + 2
-        ws.column_dimensions[get_column_letter(col[0].column)].width = mx
-
-    bio = io.BytesIO(); wb.save(bio); bio.seek(0)
-    return bio.read()
-
-# ===================== Excel formato plantilla (parte 2) =====================
-def build_formatted_excel(df_final: pd.DataFrame,
-                          header_lines: List[str],
-                          logo_bytes: Optional[bytes]) -> bytes:
-    wb = Workbook(); ws = wb.active; ws.title = "Reporte"
-    bold = Font(bold=True)
-    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    thin = Side(style="thin")
-    border = Border(top=thin, bottom=thin, left=thin, right=thin)
-    gray = PatternFill("solid", fgColor="DDDDDD")
-    group_fill = PatternFill("solid", fgColor="EEEEEE")
-
-    widths = {"A":24,"B":28,"C":16,"D":16,"E":16,"F":16,"G":10,"H":12,"I":12,"J":12,"K":12,"L":12,"M":12,"N":12,"O":12,"P":12}
-    for k, v in widths.items():
-        ws.column_dimensions[k].width = v
-    for r in range(1, 5):
-        ws.row_dimensions[r].height = 20
-
-    # Encabezado texto (A1:B4)
-    for i, line in enumerate(header_lines[:4], start=1):
-        ws.merge_cells(f"A{i}:B{i}")
-        c = ws[f"A{i}"]; c.value = line; c.fill = gray
-        c.font = Font(bold=True); c.alignment = Alignment(horizontal="left", vertical="center")
-        for col in ("A","B"): ws.cell(row=i, column=ord(col)-64).border = border
-
-    # Fecha de emisión (I1:P1)
-    ws.merge_cells("I1:J1"); ws["I1"] = "Fecha de emisión"
-    ws["I1"].font = Font(bold=True, size=10); ws["I1"].alignment = center; ws["I1"].fill = gray
-    ws.merge_cells("K1:P1"); ws["K1"] = datetime.now().strftime("%d-%b-%y").lower()
-    ws["K1"].font = Font(bold=True, size=10); ws["K1"].alignment = center
-    for col_idx in range(ord("I")-64, ord("P")-64+1):
-        ws.cell(row=1, column=col_idx).border = border
-
-    # Cliente (I2:P2)
-    ws.merge_cells("I2:P2")
-    ws["I2"] = "Cliente: ____________________________"
-    ws["I2"].font = Font(bold=True, size=10)
-    ws["I2"].alignment = Alignment(horizontal="left", vertical="center")
-    for col_idx in range(ord("I")-64, ord("P")-64+1):
-        ws.cell(row=2, column=col_idx).border = border
-
-    # Logo
-    if logo_bytes is None:
-        logo_bytes = sample_logo_bytes()
-    if logo_bytes:
-        fit_logo(ws, logo_bytes, top_left="C1", bottom_right="F4", padding=6)
-
-    # Título
-    ws.merge_cells("A6:P6"); ws["A6"] = "REPORTE DE DOSIMETRÍA"
-    ws["A6"].font = Font(bold=True, size=14); ws["A6"].alignment = center
-
-    # Bloques
-    ws.merge_cells("H7:J7"); ws["H7"] = "DOSIS ACTUAL (mSv)"
-    ws.merge_cells("K7:M7"); ws["K7"] = "DOSIS ANUAL (mSv)"
-    ws.merge_cells("N7:P7"); ws["N7"] = "DOSIS DE POR VIDA (mSv)"
-    for rng in (("H7","J7"), ("K7","M7"), ("N7","P7")):
-        start_col = column_index_from_string(rng[0][0]); end_col = column_index_from_string(rng[1][0]); row = 7
-        ws[rng[0]].font = bold; ws[rng[0]].alignment = center; ws[rng[0]].fill = group_fill
-        for col in range(start_col, end_col + 1):
-            c = ws.cell(row=row, column=col); c.border = border; c.fill = group_fill
-
-    # Encabezados
-    headers = [
-        "PERIODO DE LECTURA","COMPAÑÍA","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-        "FECHA Y HORA DE LECTURA","TIPO DE DOSÍMETRO",
-        "Hp (10) ACTUAL","Hp (0.07) ACTUAL","Hp (3) ACTUAL",
-        "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-        "Hp (10) VIDA","Hp (0.07) VIDA","Hp (3) VIDA",
-    ]
-    header_row = 8
-    for col_idx, h in enumerate(headers, start=1):
-        cell = ws.cell(row=header_row, column=col_idx, value=h)
-        cell.font = bold; cell.alignment = center; cell.border = border; cell.fill = gray
-
-    # Datos
-    start_row = header_row + 1
-    for _, r in df_final[headers].iterrows():
-        ws.append(list(r.values))
-    last_row = ws.max_row
-
-    # Formato filas
-    for row in ws.iter_rows(min_row=header_row, max_row=last_row, min_col=1, max_col=len(headers)):
-        for cell in row:
-            cell.border = border
-            if cell.row >= start_row:
-                cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
-    for rr in range(start_row, last_row + 1):
-        ws.row_dimensions[rr].height = 20
-
-    ws.freeze_panes = f"A{start_row}"
-
-    # Auto-ancho
-    for col_cells in ws.iter_cols(min_col=1, max_col=16, min_row=header_row, max_row=last_row):
-        col_letter = get_column_letter(col_cells[0].column)
-        max_len = max(len("" if c.value is None else str(c.value)) for c in col_cells)
-        ws.column_dimensions[col_letter].width = max(ws.column_dimensions[col_letter].width, min(max_len + 2, 42))
-
-    # Sección informativa
-    row = last_row + 2
-    ws.merge_cells(f"A{row}:P{row}"); ws[f"A{row}"] = "INFORMACIÓN DEL REPORTE DE DOSIMETRÍA"
-    ws[f"A{row}"].font = Font(bold=True); ws[f"A{row}"].alignment = Alignment(horizontal="center"); row += 1
-
-    bullets = [
-        "‒ Periodo de lectura: periodo de uso del dosímetro personal.",
-        "‒ Fecha de lectura: fecha en que se realizó la lectura.",
-        "‒ Tipo de dosímetro:",
-    ]
-    for text in bullets:
-        ws.merge_cells(f"A{row}:D{row}")
-        c = ws[f"A{row}"]; c.value = text
-        c.font = Font(size=10, bold=True); c.alignment = Alignment(horizontal="left")
-        row += 2
-
-    tipos = [("CE","Cuerpo Entero"), ("A","Anillo"), ("B","Brazalete"), ("CR","Cristalino")]
-    for clave, desc in tipos:
-        ws.merge_cells(f"C{row}:D{row}"); ws[f"C{row}"] = f"{clave} = {desc}"
-        ws[f"C{row}"].font = Font(size=10, bold=True); ws[f"C{row}"].alignment = Alignment(horizontal="left")
-        for col in ("C","D"): ws.cell(row=row, column=ord(col)-64).border = border
-        row += 1
-    row += 1
-
-    ws.merge_cells(f"F{row}:I{row}"); ws[f"F{row}"] = "LÍMITES ANUALES DE EXPOSICIÓN A RADIACIONES"
-    ws[f"F{row}"].font = Font(bold=True, size=10); ws[f"F{row}"].alignment = Alignment(horizontal="center")
-    row += 1
-
-    limites = [
-        ("Cuerpo Entero", "20 mSv/año"),
-        ("Cristalino", "150 mSv/año"),
-        ("Extremidades y piel", "500 mSv/año"),
-        ("Fetal", "1 mSv/periodo de gestación"),
-        ("Público", "1 mSv/año"),
-    ]
-    for cat, val in limites:
-        ws.merge_cells(f"F{row}:G{row}"); ws[f"F{row}"] = cat
-        ws[f"F{row}"].font = Font(size=10); ws[f"F{row}"].alignment = Alignment(horizontal="left")
-        ws.merge_cells(f"H{row}:I{row}"); ws[f"H{row}"] = val
-        ws[f"H{row}"].font = Font(size=10); ws[f"H{row}"].alignment = Alignment(horizontal="right")
-        for col in ("F","G","H","I"): ws.cell(row=row, column=ord(col)-64).border = border
-        row += 1
-    row += 2
-
-    ws.merge_cells(f"A{row}:P{row}"); ws[f"A{row}"] = "‒ DATOS DEL PARTICIPANTE:"
-    ws[f"A{row}"].font = Font(bold=True, size=10); ws[f"A{row}"].alignment = Alignment(horizontal="left"); row += 1
-
-    datos = [
-        "‒ Código de usuario: Número único asignado al usuario por Microsievert, S.A.",
-        "‒ Nombre: Persona a la cual se le asigna el dosímetro personal.",
-        "‒ Cédula: Número del documento de identidad personal del usuario.",
-    ]
-    for txt in datos:
-        ws.merge_cells(f"A{row}:P{row}"); ws[f"A{row}"] = txt
-        ws[f"A{row}"].font = Font(size=10); ws[f"A{row}"].alignment = Alignment(horizontal="left")
-        row += 1
-    row += 2
-
-    ws.merge_cells(f"A{row}:P{row}"); ws[f"A{row}"] = "‒ DOSIS EN MILISIEVERT:"
-    ws[f"A{row}"].font = Font(bold=True, size=10); ws[f"A{row}"].alignment = Alignment(horizontal="left"); row += 1
-
-    shade = PatternFill("solid", fgColor="DDDDDD")
-    ws.merge_cells(f"B{row}:C{row}"); ws[f"B{row}"] = "Nombre"
-    ws[f"B{row}"].font = Font(bold=True, size=10)
-    ws[f"B{row}"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True); ws[f"B{row}"].fill = shade
-    ws.merge_cells(f"D{row}:I{row}"); ws[f"D{row}"] = "Definición"
-    ws[f"D{row}"].font = Font(bold=True, size=10)
-    ws[f"D{row}"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True); ws[f"D{row}"].fill = shade
-    ws.merge_cells(f"J{row}:J{row}"); ws[f"J{row}"] = "Unidad"
-    ws[f"J{row}"].font = Font(bold=True, size=10)
-    ws[f"J{row}"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True); ws[f"J{row}"].fill = shade
-    for col in ("B","C","D","E","F","G","H","I","J"):
-        ws.cell(row=row, column=ord(col)-64).border = border
-    ws.row_dimensions[row].height = 30; row += 1
-
-    definitions = [
-        ("Dosis efectiva Hp(10)",  "Es la dosis equivalente en tejido blando, J·kg⁻¹ o Sv a una profundidad de 10 mm, bajo determinado punto del cuerpo.", "mSv"),
-        ("Dosis superficial Hp(0,07)", "Es la dosis equivalente en tejido blando, J·kg⁻¹ o Sv a una profundidad de 0,07 mm, bajo determinado punto del cuerpo.", "mSv"),
-        ("Dosis cristalino Hp(3)", "Es la dosis equivalente en tejido blando, J·kg⁻¹ o Sv a una profundidad de 3 mm, bajo determinado punto del cuerpo.", "mSv"),
-    ]
-    for nom, desc, uni in definitions:
-        ws.merge_cells(f"B{row}:C{row}"); ws[f"B{row}"] = nom
-        ws[f"B{row}"].font = Font(size=10, bold=True); ws[f"B{row}"].alignment = Alignment(horizontal="left", wrap_text=True)
-        ws.merge_cells(f"D{row}:I{row}"); ws[f"D{row}"] = desc
-        ws[f"D{row}"].font = Font(size=10); ws[f"D{row}"].alignment = Alignment(horizontal="left", wrap_text=True)
-        ws.merge_cells(f"J{row}:J{row}"); ws[f"J{row}"] = uni
-        ws[f"J{row}"].font = Font(size=10); ws[f"J{row}"].alignment = Alignment(horizontal="center", wrap_text=True)
-        for col in ("B","C","D","E","F","G","H","I","J"):
-            ws.cell(row=row, column=ord(col)-64).border = border
-        ws.row_dimensions[row].height = 30; row += 1
-
-    row += 1
-    ws.merge_cells(f"A{row}:P{row}")
-    ws[f"A{row}"] = "LECTURAS DE ANILLO: las lecturas del dosímetro de anillo son registradas como una dosis equivalente superficial Hp(0,07)."
-    ws[f"A{row}"].font = Font(size=10, bold=True); ws[f"A{row}"].alignment = Alignment(horizontal="left", wrap_text=True); row += 1
-
-    ws.merge_cells(f"A{row}:P{row}")
-    ws[f"A{row}"] = "Los resultados de las dosis individuales de radiación son reportados para diferentes periodos de tiempo:"
-    ws[f"A{row}"].font = Font(size=10); ws[f"A{row}"].alignment = Alignment(horizontal="left", wrap_text=True); row += 1
-
-    blocks = [
-        ("DOSIS ACTUAL",      "Es el correspondiente de dosis acumulada durante el período de lectura definido."),
-        ("DOSIS ANUAL",       "Es el correspondiente de dosis acumulada desde el inicio del año hasta la fecha."),
-        ("DOSIS DE POR VIDA", "Es el correspondiente de dosis acumulada desde el inicio del servicio dosimétrico hasta la fecha."),
-    ]
-    for clave, texto in blocks:
-        ws.merge_cells(f"B{row}:C{row}"); ws[f"B{row}"] = clave
-        ws[f"B{row}"].font = Font(bold=True, size=10); ws[f"B{row}"].alignment = Alignment(horizontal="center")
-        ws.merge_cells(f"D{row}:P{row}"); ws[f"D{row}"] = texto
-        ws[f"D{row}"].font = Font(size=10); ws[f"D{row}"].alignment = Alignment(horizontal="left", wrap_text=True)
-        for col_idx in range(ord("B")-64, ord("P")-64+1):
-            ws.cell(row=row, column=col_idx).border = border
-        row += 1
-
-    row += 2
-    ws.merge_cells(f"A{row}:P{row}")
-    ws[f"A{row}"] = ("DOSÍMETRO DE CONTROL: incluido en cada paquete entregado para monitorear la exposición a la radiación "
-                     "recibida durante el tránsito y almacenamiento. Este dosímetro debe ser guardado por el cliente en un "
-                     "área libre de radiación durante el período de uso.")
-    ws[f"A{row}"].font = Font(size=10, bold=True); ws[f"A{row}"].alignment = Alignment(horizontal="left", wrap_text=True); row += 2
-
-    ws.merge_cells(f"A{row}:P{row}")
-    ws[f"A{row}"] = ("POR DEBAJO DEL MÍNIMO DETECTADO: es la dosis por debajo de la cantidad mínima reportada para el período "
-                     "de uso y son registradas como \"PM\".")
-    ws[f"A{row}"].font = Font(size=10, bold=True); ws[f"A{row}"].alignment = Alignment(horizontal="left", wrap_text=True)
-
-    bio = BytesIO(); wb.save(bio); bio.seek(0)
-    return bio.getvalue()
-
 # ===================== TABS =====================
 tab1, tab2 = st.tabs(["📥 Carga, VALOR−CONTROL y Subida a Ninox", "📊 Reporte Actual / Anual / Vida (desde Ninox)"])
 
 # ===================== TAB 1 =====================
 with tab1:
-    st.subheader("📤 Cargar archivo de Dosis y cruzar con BASE DE DATOS (Ninox)")
+    st.subheader("📤 Cargar archivo de Dosis y cruzar con LISTA DE CODIGO (Ninox)")
 
     with st.sidebar:
         st.markdown("### ⚙️ Configuración (TAB 1)")
-        base_table_id   = st.text_input("Table ID BASE DE DATOS", value=DEFAULT_BASE_TABLE_ID, key="tab1_base")
+        base_table_id   = st.text_input("Table ID BASE / Códigos", value=DEFAULT_BASE_TABLE_ID, key="tab1_base")
         report_table_id = st.text_input("Table ID REPORTE", value=DEFAULT_REPORT_TABLE_ID, key="tab1_report")
         periodo_filtro  = st.text_input("Filtro PERIODO (opcional)", value="— TODOS —", key="tab1_per")
         subir_pm_como_texto = st.checkbox("Subir 'PM' como TEXTO (si campos Hp son Texto en Ninox)", value=True, key="tab1_pm_texto")
@@ -655,14 +430,16 @@ with tab1:
     try:
         if show_tables:
             st.expander("Tablas Ninox (debug)").json(ninox_list_tables(TEAM_ID, DATABASE_ID))
-        df_participantes = ninox_fetch_records(TEAM_ID, DATABASE_ID, base_table_id)
-        if df_participantes.empty:
-            st.warning("No hay datos en BASE DE DATOS (Ninox).")
+        df_lista_raw = ninox_fetch_records(TEAM_ID, DATABASE_ID, base_table_id)
+        if df_lista_raw.empty:
+            st.warning("No hay datos en la tabla base.")
+            df_participantes = None
         else:
-            st.success(f"Conectado a Ninox. Tabla BASE DE DATOS: {base_table_id}")
+            df_participantes = normalize_lista_codigo(df_lista_raw)
+            st.success(f"Conectado a Ninox. Tabla base: {base_table_id}")
             st.dataframe(df_participantes.head(15), use_container_width=True)
     except Exception as e:
-        st.error(f"Error leyendo BASE DE DATOS: {e}")
+        st.error(f"Error leyendo tabla base: {e}")
         df_participantes = None
 
     st.markdown("#### Archivo de Dosis")
@@ -682,30 +459,32 @@ with tab1:
 
     if btn_proc:
         if df_participantes is None or df_participantes.empty:
-            st.error("No hay participantes desde Ninox.")
+            st.error("No hay filas en LISTA DE CODIGO desde Ninox.")
         elif df_dosis is None or df_dosis.empty:
             st.error("No hay datos de dosis.")
         elif 'dosimeter' not in df_dosis.columns:
             st.error("El archivo de dosis debe tener la columna 'dosimeter'.")
         else:
             with st.spinner("Procesando..."):
-                registros = construir_registros(df_participantes, df_dosis, periodo_filtro=periodo_filtro)
+                registros = construir_registros_desde_lista_codigo(
+                    df_participantes, df_dosis, periodo_filtro=periodo_filtro
+                )
                 if not registros:
-                    st.warning("No hay coincidencias DOSÍMETRO ↔ dosis (revisa filtro/códigos).")
+                    st.warning("No hay coincidencias CÓDIGO_DOSÍMETRO ↔ dosis (revisa filtro/códigos).")
                 else:
                     registros = aplicar_valor_menos_control(registros)
                     df_final = pd.DataFrame(registros)
 
-                    # Limpieza suave
                     df_final['PERIODO DE LECTURA'] = (
                         df_final['PERIODO DE LECTURA'].astype(str)
                         .str.replace(r'\.+$', '', regex=True).str.strip()
                     )
-                    df_final.loc[df_final.index.min(), 'NOMBRE'] = 'CONTROL'
-                    df_final['NOMBRE'] = (
-                        df_final['NOMBRE'].astype(str)
-                        .str.replace(r'\.+$', '', regex=True).str.strip()
-                    )
+                    if not df_final.empty:
+                        df_final.loc[df_final.index.min(), 'NOMBRE'] = 'CONTROL'
+                        df_final['NOMBRE'] = (
+                            df_final['NOMBRE'].astype(str)
+                            .str.replace(r'\.+$', '', regex=True).str.strip()
+                        )
 
                     st.session_state.df_final = df_final
                     st.success(f"¡Listo! Registros generados: {len(df_final)}")
@@ -813,9 +592,58 @@ with tab1:
 
 # ===================== TAB 2 =====================
 with tab2:
+    # ---- Helpers internos de TAB 2 ----
+    def fetch_all_records(table_hint: str, page_size: int = 1000):
+        table_id = ninox_resolve_table_id(TEAM_ID, DATABASE_ID, table_hint)
+        url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
+        skip, out = 0, []
+        while True:
+            r = requests.get(url, headers=ninox_headers(), params={"limit": page_size, "skip": skip}, timeout=60)
+            r.raise_for_status()
+            chunk = r.json()
+            if not chunk: break
+            out.extend(chunk)
+            if len(chunk) < page_size: break
+            skip += page_size
+        return out
+
+    def normalize_df(records):
+        rows = []
+        for r in records:
+            f = r.get("fields", {}) or {}
+            rows.append({
+                "_id": r.get("id"),
+                "PERIODO DE LECTURA": f.get("PERIODO DE LECTURA"),
+                "COMPAÑÍA": f.get("COMPAÑÍA"),
+                "CÓDIGO DE DOSÍMETRO": str(f.get("CÓDIGO DE DOSÍMETRO") or "").strip(),
+                "NOMBRE": f.get("NOMBRE"),
+                "CÉDULA": f.get("CÉDULA"),
+                "FECHA DE LECTURA": f.get("FECHA DE LECTURA"),
+                "TIPO DE DOSÍMETRO": f.get("TIPO DE DOSÍMETRO"),
+                "Hp10_RAW":  as_value(f.get("Hp (10)")),
+                "Hp007_RAW": as_value(f.get("Hp (0.07)")),
+                "Hp3_RAW":  as_value(f.get("Hp (3)")),
+                "Hp10_NUM":  as_num(f.get("Hp (10)")),
+                "Hp007_NUM": as_num(f.get("Hp (0.07)")),
+                "Hp3_NUM":  as_num(f.get("Hp (3)")),
+            })
+        df = pd.DataFrame(rows)
+        df["FECHA_DE_LECTURA_DT"] = pd.to_datetime(
+            df["FECHA DE LECTURA"].apply(
+                lambda x: dtparse(str(x), dayfirst=True) if pd.notna(x) and str(x).strip() != "" else pd.NaT
+            ), errors="coerce"
+        )
+        df["NOMBRE_NORM"] = df["NOMBRE"].fillna("").astype(str).str.strip()
+        df["CÉDULA_NORM"] = df["CÉDULA"].fillna("").astype(str).str.strip()
+        return df
+
+    def fmt_fecha(dtval):
+        if pd.isna(dtval): return ""
+        try: return pd.to_datetime(dtval).strftime("%d/%m/%Y %H:%M")
+        except Exception: return str(dtval)
+
     st.subheader("📊 Reporte — Actual, Anual y de por Vida (por persona) desde Ninox REPORTE")
 
-    # Sidebar específica de TAB 2
     with st.sidebar:
         st.markdown("### ⚙️ Configuración (TAB 2)")
         header_line1 = st.text_input("Encabezado Excel — Línea 1", "MICROSIEVERT, S.A.", key="tab2_h1")
@@ -864,7 +692,7 @@ with tab2:
         st.warning("No hay registros que cumplan los filtros de Compañía y/o Tipo de dosímetro.")
         st.stop()
 
-    # Leer códigos (opcional)
+    # Leer códigos (opcional) para filtrar
     def read_codes_from_files(files) -> Set[str]:
         codes: Set[str] = set()
         for f in files or []:
@@ -1041,11 +869,6 @@ with tab2:
         if c not in out.columns: out[c] = 0.0
         out[c] = out[c].fillna(0.0)
 
-    def fmt_fecha(dtval):
-        if pd.isna(dtval): return ""
-        try: return pd.to_datetime(dtval).strftime("%d/%m/%Y %H:%M")
-        except Exception: return str(dtval)
-
     out["Hp (10) ACTUAL"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_ACTUAL_RAW_LIST", []), r["Hp10_ACTUAL_NUM_SUM"]), axis=1)
     out["Hp (0.07) ACTUAL"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_ACTUAL_RAW_LIST", []), r["Hp007_ACTUAL_NUM_SUM"]), axis=1)
     out["Hp (3) ACTUAL"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_ACTUAL_RAW_LIST",  []), r["Hp3_ACTUAL_NUM_SUM"]),  axis=1)
@@ -1065,7 +888,7 @@ with tab2:
 
     out["Hp (10) VIDA"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_LIFE_RAW_LIST", []), r["Hp10_LIFE_NUM_SUM"]), axis=1)
     out["Hp (0.07) VIDA"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_LIFE_RAW_LIST", []), r["Hp007_LIFE_NUM_SUM"]), axis=1)
-    out["Hp (3) VIDA"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_LIFE_RAW_LIST",  []), r["Hp3_LIFE_NUM_SUM"]),  axis=1)
+    out["Hp (3) VIDA"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_LIFE_RAW_LIST",  []), r["Hp3_LIFE_NUM_SUM"]), axis=1)
 
     out["FECHA Y HORA DE LECTURA"] = out["FECHA_DE_LECTURA_DT"].apply(fmt_fecha)
     out["PERIODO DE LECTURA"] = st.session_state.get("tab2_periodo", "")
@@ -1112,19 +935,8 @@ with tab2:
         key="tab2_dl_xlsx_simple"
     )
 
-    # Excel plantilla (con Cliente en I2:P2)
-    header_lines = [st.session_state.get("tab2_h1",""), st.session_state.get("tab2_h2",""),
-                    st.session_state.get("tab2_h3",""), st.session_state.get("tab2_h4","")]
-    logo_bytes = st.session_state.get("tab2_logo").read() if st.session_state.get("tab2_logo") is not None else None
-
-    xlsx_fmt = build_formatted_excel(out.copy(), header_lines, logo_bytes)
-    st.download_button(
-        "⬇️ Descargar Excel (formato plantilla)",
-        data=xlsx_fmt,
-        file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="tab2_dl_xlsx_fmt"
-    )
+    # (Opcional) Excel formato plantilla: si más adelante quieres reactivar tu versión con logos,
+    # vuelve a colocar tu función build_formatted_excel y el botón de descarga.
 
 
 
