@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
-# Streamlit app: CRUCE EXCLUSIVO por CÓDIGO_DOSÍMETRO (LISTA) ↔ dosimeter (Dosis)
-# Lee AMBAS tablas desde ARCHIVOS (CSV/XLS/XLSX), normaliza códigos y periodos (AGO-25 → AGOSTO 2025),
-# permite filtrar por uno o VARIOS periodos (vacío = TODOS), deduplica:
-#   - LISTA: una fila por (PERIODO_NORM, CODIGO)
-#   - DOSIS: lectura más reciente por dosimeter
-# calcula VALOR−CONTROL y exporta Excel.
+# Streamlit app: CRUCE por CÓDIGO_DOSÍMETRO (LISTA) ↔ dosimeter (Dosis)
+# - Puede subir la LISTA desde archivo o, si no sube nada, la toma por defecto de:
+#     /mnt/data/MSV_DOSIMETRÍA FINAL.xlsx  (hoja: asignar_DOSÍMETRO)
+# - Normaliza códigos (p.ej. "/WB115" → "WB000115") y periodos ("AGO-25" → "AGOSTO 2025")
+# - Permite filtrar por uno o VARIOS periodos (vacío = TODOS)
+# - Deduplica:
+#     LISTA: una fila por (PERIODO_NORM, CODIGO)
+#     DOSIS: lectura más reciente por dosimeter (si hay timestamp)
+# - Calcula VALOR−CONTROL y exporta Excel
 
 import re
 from io import BytesIO
@@ -14,10 +17,14 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 import streamlit as st
 
+# ===================== Ajustes por defecto (LISTA) =====================
+DEFAULT_LISTA_FILE = "/mnt/data/MSV_DOSIMETRÍA FINAL.xlsx"
+DEFAULT_SHEET      = "asignar_DOSÍMETRO"  # 👈 hoja exacta donde está la LISTA
+
 # ===================== UI / App =====================
 st.set_page_config(page_title="Dosimetría — Match por Código (archivos)", page_icon="🧪", layout="wide")
 st.title("🧪 Dosimetría — Match exacto CÓDIGO_DOSÍMETRO ↔ dosimeter (archivos)")
-st.caption("Sube tu **LISTA DE CÓDIGO** y el **archivo de dosis**. El cruce se hace SOLO por el código normalizado.")
+st.caption("Sube tu **LISTA DE CÓDIGO** (o se tomará la hoja por defecto) y el **archivo de dosis**. Cruce SOLO por el código normalizado.")
 
 # ===================== Helpers =====================
 def _norm_code(x: str) -> str:
@@ -41,7 +48,7 @@ def _norm_code(x: str) -> str:
 
     if re.fullmatch(r"WB\d{6}", s):
         return s
-    return s  # deja pasar si no es WB, por si necesitas otros prefijos
+    return s  # deja pasar si no es WB, por si existieran otros prefijos
 
 def _read_csv_robusto(upload) -> pd.DataFrame:
     """
@@ -61,7 +68,7 @@ def _read_csv_robusto(upload) -> pd.DataFrame:
                 continue
     raise ultimo_error if ultimo_error else RuntimeError("No se pudo leer el CSV.")
 
-# ===================== Lectores =====================
+# ===================== Lectores LISTA =====================
 def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
     """
     Lee LISTA DE CÓDIGO desde CSV/XLS/XLSX y devuelve columnas estándar:
@@ -73,6 +80,7 @@ def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
 
     name = (upload.name or "").lower()
     if name.endswith((".xlsx", ".xls")):
+        # Si suben Excel manual, leer PRIMERA hoja
         df = pd.read_excel(upload, sheet_name=0)
     else:
         df = _read_csv_robusto(upload)
@@ -103,6 +111,42 @@ def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
 
     return out
 
+def cargar_lista_default() -> pd.DataFrame:
+    """
+    Lee la LISTA por defecto desde el Excel local y la hoja asignada.
+    """
+    try:
+        df = pd.read_excel(DEFAULT_LISTA_FILE, sheet_name=DEFAULT_SHEET)
+        st.info(f"✅ Archivo por defecto cargado: {DEFAULT_LISTA_FILE} (hoja: {DEFAULT_SHEET})")
+        # Normaliza encabezados a formato del lector para reusar mapeo
+        tmp = df.copy()
+        tmp.columns = (tmp.columns.astype(str).str.strip().str.lower().str.replace(r"\s+", " ", regex=True))
+        # Reusar el mapeo del lector estándar:
+        fake_upl = None  # truco: empacamos el dataframe ya leído a la misma estructura
+        # Como ya lo tenemos en df, mapeamos aquí sin re-llamar al uploader:
+        candidates = {
+            "cédula":             ["cédula","cedula","id","documento","ced"],
+            "código usuario":     ["código usuario","codigo usuario","codigo_usuario","codigo de usuario","usuario"],
+            "nombre":             ["nombre","nombres"],
+            "apellido":           ["apellido","apellidos"],
+            "fecha de nacimiento":["fecha de nacimiento","f. nacimiento","fecha nacimiento"],
+            "cliente":            ["cliente","compañía","compania","empresa"],
+            "código_cliente":     ["código cliente","codigo cliente","codigo_cliente","id cliente","cliente id"],
+            "etiqueta":           ["etiqueta","tag","label"],
+            "código_dosímetro":   ["código dosímetro","codigo dosimetro","codigo_dosimetro","dosímetro","dosimetro","dosimeter","codigo"],
+            "periodo de lectura": ["periodo de lectura","período de lectura","periodo","período","periodo lectura","lectura periodo","periodo (ej. agosto 2025)"],
+            "tipo de dosímetro":  ["tipo de dosímetro","tipo dosimetro","tipo_dosimetro","tipo"],
+        }
+        out = pd.DataFrame()
+        for target, opts in candidates.items():
+            found = next((opt for opt in opts if opt in tmp.columns), None)
+            out[target.upper()] = tmp[found] if found is not None else ""
+        return out
+    except Exception as e:
+        st.error(f"No se pudo abrir el archivo por defecto: {e}")
+        return pd.DataFrame()
+
+# ===================== Normalizador LISTA =====================
 def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
     """Estándar + derivados para la LISTA DE CÓDIGO, con normalización de periodos (AGO-25 → AGOSTO 2025)."""
     needed = [
@@ -169,6 +213,7 @@ def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+# ===================== Lectura de dosis =====================
 def leer_dosis(upload) -> Optional[pd.DataFrame]:
     """
     Lee archivo de dosis con columnas (dosimeter, hp10dose, hp0.07dose, hp3dose, timestamp opcional).
@@ -257,11 +302,15 @@ def aplicar_valor_menos_control(registros: List[Dict[str,Any]]):
     return registros
 
 # ===================== UI: Subidas y flujo =====================
-st.markdown("### 1) Subir **LISTA DE CÓDIGO**")
+st.markdown("### 1) LISTA DE CÓDIGO: subir archivo o usar hoja por defecto (asignar_DOSÍMETRO)")
 upl_lista = st.file_uploader("Selecciona CSV/XLS/XLSX (LISTA DE CÓDIGO)", type=["csv","xls","xlsx"], key="upl_lista")
-df_lista_raw = leer_lista_codigo_archivo(upl_lista) if upl_lista else None
 
-if df_lista_raw is not None:
+if upl_lista:
+    df_lista_raw = leer_lista_codigo_archivo(upl_lista)
+else:
+    df_lista_raw = cargar_lista_default()
+
+if df_lista_raw is not None and not df_lista_raw.empty:
     st.success(f"Lista cargada: {len(df_lista_raw)} fila(s)")
     st.dataframe(df_lista_raw.head(20), use_container_width=True)
 
@@ -281,7 +330,7 @@ if df_lista_raw is not None:
     st.markdown("### 2) Subir **Archivo de Dosis**")
     upl_dosis = st.file_uploader("Selecciona CSV/XLS/XLSX (dosis)", type=["csv","xls","xlsx"], key="upl_dosis")
     df_dosis = leer_dosis(upl_dosis) if upl_dosis else None
-    if df_dosis is not None:
+    if df_dosis is not None and not df_dosis.empty:
         st.success(f"Dosis cargadas: {len(df_dosis)} fila(s)")
         st.dataframe(df_dosis.head(20), use_container_width=True)
 
@@ -292,7 +341,7 @@ if df_lista_raw is not None:
     with c2:
         btn_proc = st.button("✅ Procesar (match por código)", type="primary", use_container_width=True)
 
-    show_debug = st.checkbox("🔎 Debug: sets, duplicados y coincidencias", value=False)
+    show_debug = st.checkbox("🔎 Debug: duplicados y coincidencias", value=False)
 
     if btn_proc:
         if df_lista_f.empty:
@@ -321,6 +370,7 @@ if df_lista_raw is not None:
                 else:
                     df_dosis_g = df_dosis_g.drop_duplicates("dosimeter", keep="last").copy()
 
+                # Resumen sets (opcional)
                 if show_debug:
                     with st.expander("Resumen de sets (tras dedupe)"):
                         set_lista  = set(df_lista_f["CODIGO"].dropna().astype(str))
@@ -330,6 +380,8 @@ if df_lista_raw is not None:
                         st.write(f"Códigos en DOSIS (dedupe): {len(set_dosis)}")
                         st.write(f"Intersección: {len(inter)}")
                         st.write("Ejemplos intersección:", sorted(list(inter))[:50])
+                        st.write("En dosis pero NO en lista (ej.):", sorted(list(set_dosis - set_lista))[:50])
+                        st.write("En lista pero NO en dosis (ej.):", sorted(list(set_lista - set_dosis))[:50])
 
                 # ========== CRUCE EXCLUSIVO: CODIGO (LISTA) ↔ dosimeter (Dosis) ==========
                 df_merge = pd.merge(
@@ -415,4 +467,4 @@ if df_lista_raw is not None:
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
 else:
-    st.info("Sube primero la **LISTA DE CÓDIGO** para continuar.")
+    st.info("Sube la **LISTA DE CÓDIGO** o se usará automáticamente el archivo/hoja por defecto.")
