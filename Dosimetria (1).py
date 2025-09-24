@@ -813,5 +813,3 @@ with tab2:
                        file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="tab2_dl_xlsx_fmt")
-
-
