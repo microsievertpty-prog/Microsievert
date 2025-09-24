@@ -712,7 +712,7 @@ with tab2:
         "Hp3_NUM": "Hp3_ACTUAL_NUM_SUM",
     })
 
-    # ANUAL
+    # ANUAL (suma Actual + Previos)  ✅ corregido el paréntesis
     usar_anual_automatico = st.session_state.get("tab2_auto", True)
     if usar_anual_automatico:
         if df_curr["FECHA_DE_LECTURA_DT"].notna().any():
@@ -760,6 +760,7 @@ with tab2:
     }).reset_index()
     out = out.merge(gb_life_sum, on=keys, how="left").merge(gb_life_raw, on=keys, how="left")
 
+    # Totales finales
     for c in ["Hp10_ACTUAL_NUM_SUM","Hp007_ACTUAL_NUM_SUM","Hp3_ACTUAL_NUM_SUM",
               "Hp10_PREV_NUM_SUM","Hp007_PREV_NUM_SUM","Hp3_PREV_NUM_SUM",
               "Hp10_LIFE_NUM_SUM","Hp007_LIFE_NUM_SUM","Hp3_LIFE_NUM_SUM"]:
@@ -769,12 +770,29 @@ with tab2:
     out["Hp (10) ACTUAL"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_ACTUAL_RAW_LIST", []), r["Hp10_ACTUAL_NUM_SUM"]), axis=1)
     out["Hp (0.07) ACTUAL"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_ACTUAL_RAW_LIST", []), r["Hp007_ACTUAL_NUM_SUM"]), axis=1)
     out["Hp (3) ACTUAL"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_ACTUAL_RAW_LIST",  []), r["Hp3_ACTUAL_NUM_SUM"]),  axis=1)
-    out["Hp (10) ANUAL"] = out.apply(lambda r: pm_or_sum(merge_raw_lists(r.get("Hp10_ACTUAL_RAW_LIST"), r.get("Hp10_PREV_RAW_LIST")),
-                                                         float(r["Hp10_ACTUAL_NUM_SUM"]) + float(r["Hp10_PREV_NUM_SUM"])), axis=1)
-    out["Hp (0.07) ANUAL"] = out.apply(lambda r: pm_or_sum(merge_raw_lists(r.get("Hp007_ACTUAL_RAW_LIST"), r.get("Hp007_PREV_RAW_LIST"]),
-                                                         float(r["Hp007_ACTUAL_NUM_SUM"]) + float(r["Hp007_PREV_NUM_SUM"])), axis=1)
-    out["Hp (3) ANUAL"]    = out.apply(lambda r: pm_or_sum(merge_raw_lists(r.get("Hp3_ACTUAL_RAW_LIST"),  r.get("Hp3_PREV_RAW_LIST"]),
-                                                         float(r["Hp3_ACTUAL_NUM_SUM"])  + float(r["Hp3_PREV_NUM_SUM"])),  axis=1)
+
+    out["Hp (10) ANUAL"] = out.apply(
+        lambda r: pm_or_sum(
+            merge_raw_lists(r.get("Hp10_ACTUAL_RAW_LIST"), r.get("Hp10_PREV_RAW_LIST")),
+            float(r["Hp10_ACTUAL_NUM_SUM"]) + float(r["Hp10_PREV_NUM_SUM"])
+        ),
+        axis=1
+    )
+    out["Hp (0.07) ANUAL"] = out.apply(
+        lambda r: pm_or_sum(
+            merge_raw_lists(r.get("Hp007_ACTUAL_RAW_LIST"), r.get("Hp007_PREV_RAW_LIST")),
+            float(r["Hp007_ACTUAL_NUM_SUM"]) + float(r["Hp007_PREV_NUM_SUM"])
+        ),
+        axis=1
+    )
+    out["Hp (3) ANUAL"] = out.apply(
+        lambda r: pm_or_sum(
+            merge_raw_lists(r.get("Hp3_ACTUAL_RAW_LIST"), r.get("Hp3_PREV_RAW_LIST")),
+            float(r["Hp3_ACTUAL_NUM_SUM"]) + float(r["Hp3_PREV_NUM_SUM"])
+        ),
+        axis=1
+    )
+
     out["Hp (10) VIDA"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_LIFE_RAW_LIST", []), r["Hp10_LIFE_NUM_SUM"]), axis=1)
     out["Hp (0.07) VIDA"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_LIFE_RAW_LIST", []), r["Hp007_LIFE_NUM_SUM"]), axis=1)
     out["Hp (3) VIDA"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_LIFE_RAW_LIST",  []), r["Hp3_LIFE_NUM_SUM"]),  axis=1)
