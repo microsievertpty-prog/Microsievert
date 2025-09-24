@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+# Streamlit app: LISTA DE CÓDIGO (archivo) + Dosis (archivo)
+# Cruce EXCLUSIVO: CÓDIGO_DOSÍMETRO (LISTA) ↔ dosimeter (Dosis)
+# Normaliza códigos, filtra por PERIODO, calcula VALOR−CONTROL y exporta Excel.
+
 import re
 from io import BytesIO
 from datetime import datetime
@@ -7,17 +11,16 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 import streamlit as st
 
-# ===================== App =====================
-st.set_page_config(page_title="Dosimetría — Solo archivos", page_icon="🧪", layout="wide")
-st.title("🧪 Dosimetría — Cargar LISTA DE CÓDIGO y Dosis (sin Ninox)")
-st.caption("Sube tu LISTA DE CÓDIGO (tabla de lectura) y tu archivo de dosis. Cruce + VALOR−CONTROL + exportación.")
+# ===================== UI =====================
+st.set_page_config(page_title="Dosimetría — Match por CÓDIGO_DOSÍMETRO ↔ dosimeter", page_icon="🧪", layout="wide")
+st.title("🧪 Dosimetría — Match exacto CÓDIGO_DOSÍMETRO ↔ dosimeter (solo archivos)")
+st.caption("Sube tu LISTA DE CÓDIGO y tu archivo de dosis. Hacemos el cruce SOLO con esas columnas, normalizando códigos.")
 
 # ===================== Helpers =====================
 def _norm_code(x: str) -> str:
     """
     Normaliza un código a formato 'WB' + 6 dígitos.
-    - Quita NBSP, espacios, guiones, etc.
-    - Acepta entradas como 'WB57', '57', 'WB000057', ' wb 000057 ' → 'WB000057'
+    Acepta '57', 'WB57', 'WB000057', ' wb-000057 ' → 'WB000057'
     """
     if x is None:
         return ""
@@ -25,27 +28,42 @@ def _norm_code(x: str) -> str:
     s = s.replace("\u00A0", " ").strip()     # NBSP
     s = re.sub(r"[^A-Z0-9]", "", s)          # quita no alfanumérico
 
-    # Solo dígitos => WB + 6 dígitos
     m_dig = re.fullmatch(r"(\d+)", s)
     if m_dig:
-        num = m_dig.group(1).zfill(6)
-        return f"WB{num}"
+        return f"WB{m_dig.group(1).zfill(6)}"
 
-    # WB + dígitos => pad a 6
     m_wb = re.fullmatch(r"WB(\d+)", s)
     if m_wb:
-        num = m_wb.group(1).zfill(6)
-        return f"WB{num}"
+        return f"WB{m_wb.group(1).zfill(6)}"
 
-    # Si ya es correcto, deja; en otro caso, devuelve lo limpiado
     if re.fullmatch(r"WB\d{6}", s):
         return s
     return s
 
+def _read_csv_robusto(upload) -> pd.DataFrame:
+    """
+    Intenta leer un CSV probando varias codificaciones y separadores para evitar UnicodeDecodeError.
+    """
+    raw = upload.read()
+    upload.seek(0)
+    codificaciones = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]
+    separadores = [None, ",", ";", "\t", "|"]   # None = autodetección (engine='python')
+    ultimo_error = None
+    for enc in codificaciones:
+        for sep in separadores:
+            try:
+                return pd.read_csv(BytesIO(raw), sep=sep, engine="python", encoding=enc)
+            except Exception as e:
+                ultimo_error = e
+                continue
+    raise ultimo_error if ultimo_error else RuntimeError("No se pudo leer el CSV.")
+
+# ===================== Lectores =====================
 def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
     """
-    Lee LISTA DE CÓDIGO desde CSV/XLS/XLSX y devuelve un DataFrame
-    con nombres estándar para el pipeline.
+    Lee LISTA DE CÓDIGO desde CSV/XLS/XLSX y devuelve columnas estándar:
+    CÉDULA, CÓDIGO USUARIO, NOMBRE, APELLIDO, FECHA DE NACIMIENTO, CLIENTE,
+    CÓDIGO_CLIENTE, ETIQUETA, CÓDIGO_DOSÍMETRO, PERIODO DE LECTURA, TIPO DE DOSÍMETRO
     """
     if not upload:
         return None
@@ -54,27 +72,21 @@ def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
     if name.endswith((".xlsx", ".xls")):
         df = pd.read_excel(upload, sheet_name=0)
     else:
-        try:
-            df = pd.read_csv(upload, sep=None, engine="python")
-        except Exception:
-            upload.seek(0)
-            df = pd.read_csv(upload)
+        df = _read_csv_robusto(upload)
 
-    # Normaliza encabezados a minúsculas con espacios simples
-    norm = (df.columns.astype(str)
-            .str.strip().str.lower()
-            .str.replace(r"\s+", " ", regex=True))
+    # Normaliza encabezados
+    norm = (df.columns.astype(str).str.strip().str.lower().str.replace(r"\s+", " ", regex=True))
     df.columns = norm
 
     # Mapeo flexible
     candidates = {
         "cédula":             ["cédula","cedula","id","documento","ced"],
-        "código usuario":     ["código usuario","codigo usuario","codigo_usuario","codigo de usuario"],
+        "código usuario":     ["código usuario","codigo usuario","codigo_usuario","codigo de usuario","usuario"],
         "nombre":             ["nombre","nombres"],
         "apellido":           ["apellido","apellidos"],
         "fecha de nacimiento":["fecha de nacimiento","f. nacimiento","fecha nacimiento"],
         "cliente":            ["cliente","compañía","compania","empresa"],
-        "código_cliente":     ["código cliente","codigo cliente","codigo_cliente","id cliente"],
+        "código_cliente":     ["código cliente","codigo cliente","codigo_cliente","id cliente","cliente id"],
         "etiqueta":           ["etiqueta","tag","label"],
         "código_dosímetro":   ["código dosímetro","codigo dosimetro","codigo_dosimetro","dosímetro","dosimetro","dosimeter","codigo"],
         "periodo de lectura": ["periodo de lectura","período de lectura","periodo","período","periodo lectura","lectura periodo"],
@@ -101,7 +113,6 @@ def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
 
     ap = df["APELLIDO"].fillna("").astype(str).str.strip()
     df["NOMBRE_COMPLETO"] = (df["NOMBRE"].fillna("").astype(str).str.strip() + " " + ap).str.strip()
-
     df["CODIGO"] = df["CÓDIGO_DOSÍMETRO"].fillna("").astype(str).map(_norm_code)
 
     df["PERIODO_NORM"] = (
@@ -126,17 +137,14 @@ def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
 def leer_dosis(upload) -> Optional[pd.DataFrame]:
     """
     Lee archivo de dosis con columnas (dosimeter, hp10dose, hp0.07dose, hp3dose, timestamp opcional).
+    Soporta CSV en múltiples codificaciones/separadores y Excel.
     """
     if not upload:
         return None
 
     name = (upload.name or "").lower()
     if name.endswith(".csv"):
-        try:
-            df = pd.read_csv(upload, delimiter=';', engine='python')
-        except Exception:
-            upload.seek(0)
-            df = pd.read_csv(upload)
+        df = _read_csv_robusto(upload)
     else:
         df = pd.read_excel(upload)
 
@@ -160,20 +168,24 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
     for cand in ['hp3dosecorr','hp3dose','hp3']:
         if cand in df.columns: df.rename(columns={cand:'hp3dose'}, inplace=True); break
 
+    # Numéricos
     for k in ['hp10dose','hp0.07dose','hp3dose']:
         if k in df.columns:
             df[k] = pd.to_numeric(df[k], errors='coerce').fillna(0.0)
         else:
             df[k] = 0.0
 
+    # Timestamp opcional
     if 'timestamp' in df.columns:
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
 
+    # Normaliza códigos
     if 'dosimeter' in df.columns:
         df['dosimeter'] = df['dosimeter'].astype(str).map(_norm_code)
 
     return df
 
+# ===================== Valor − Control =====================
 def periodo_desde_fecha(periodo_str: str, fecha_str: str) -> str:
     per = (periodo_str or "").strip().upper()
     per = re.sub(r'\.+$', '', per).strip()
@@ -191,7 +203,7 @@ def periodo_desde_fecha(periodo_str: str, fecha_str: str) -> str:
         return per or ""
 
 def aplicar_valor_menos_control(registros: List[Dict[str,Any]]):
-    """Asume primer registro = control. Resta control; si diff < 0.005 => 'PM'."""
+    """Asume primer registro = control. Resta control; si diff < 0.005 ⇒ 'PM'."""
     if not registros: return registros
     base10 = float(registros[0]['Hp(10)'])
     base07 = float(registros[0]['Hp(0.07)'])
@@ -211,24 +223,24 @@ def aplicar_valor_menos_control(registros: List[Dict[str,Any]]):
 
 # ===================== UI: Subidas =====================
 st.markdown("### 1) Subir **LISTA DE CÓDIGO** (tabla de lectura)")
-upl_lista = st.file_uploader("Selecciona CSV/XLS/XLSX", type=["csv","xls","xlsx"], key="upl_lista")
+upl_lista = st.file_uploader("Selecciona CSV/XLS/XLSX (LISTA DE CÓDIGO)", type=["csv","xls","xlsx"], key="upl_lista")
 df_lista_raw = leer_lista_codigo_archivo(upl_lista) if upl_lista else None
 
 if df_lista_raw is not None:
-    st.success(f"Lista de código cargada: {len(df_lista_raw)} fila(s)")
+    st.success(f"Lista cargada: {len(df_lista_raw)} fila(s)")
     st.dataframe(df_lista_raw.head(20), use_container_width=True)
 
     # Normaliza lista
     df_lista = normalize_lista_codigo(df_lista_raw)
 
-    # Periodos
+    # Periodos (de la LISTA)
     periodos = sorted([p for p in df_lista["PERIODO_NORM"].dropna().astype(str).unique() if p.strip() != ""])
-    st.markdown("#### Filtrar por PERIODO DE LECTURA (elige uno o varios; en blanco = TODOS)")
+    st.markdown("#### Filtrar por PERIODO DE LECTURA (multi; vacío = TODOS)")
     periods_sel = st.multiselect("PERIODO DE LECTURA", options=periodos, default=[])
 
     df_lista_f = df_lista[df_lista["PERIODO_NORM"].isin(periods_sel)] if periods_sel else df_lista.copy()
 
-    with st.expander("Resumen de periodos detectados"):
+    with st.expander("Resumen de periodos detectados (LISTA)"):
         st.write(df_lista.groupby("PERIODO_NORM").size().sort_values(ascending=False))
 
     st.markdown("### 2) Subir **Archivo de Dosis**")
@@ -238,80 +250,14 @@ if df_lista_raw is not None:
         st.success(f"Dosis cargadas: {len(df_dosis)} fila(s)")
         st.dataframe(df_dosis.head(20), use_container_width=True)
 
-    # Procesar
+    # Opciones
     c1, c2 = st.columns([1,1])
     with c1:
         nombre_out = st.text_input("Nombre archivo (sin extensión)", value=f"ReporteDosimetria_{datetime.now().strftime('%Y-%m-%d')}")
     with c2:
-        btn_proc = st.button("✅ Procesar", type="primary", use_container_width=True)
+        btn_proc = st.button("✅ Procesar (match por código)", type="primary", use_container_width=True)
 
-    # Debug toggle
-    show_debug = st.checkbox("🔎 Mostrar debug de códigos y coincidencias", value=False)
-
-    def construir_registros(df_lista_use: pd.DataFrame, df_dosis_use: pd.DataFrame) -> List[Dict[str,Any]]:
-        if df_lista_use.empty or df_dosis_use is None or df_dosis_use.empty:
-            return []
-
-        # Índice y sets → diagnósticos
-        idx = df_dosis_use.set_index("dosimeter")
-        set_dosis  = set(idx.index.dropna())
-        set_lista  = set(df_lista_use["CODIGO"].dropna().astype(str))
-        inter = set_dosis & set_lista
-        missing_en_lista = sorted(set_dosis - set_lista)
-        missing_en_dosis = sorted(set_lista - set_dosis)
-
-        if show_debug:
-            with st.expander("Coincidencias (debug)"):
-                st.write(f"Códigos en DOSIS: {len(set_dosis)}")
-                st.write(f"Códigos en LISTA: {len(set_lista)}")
-                st.write(f"Intersección: {len(inter)}")
-                st.write("Ejemplos intersección:", sorted(list(inter))[:20])
-                st.write("En dosis pero NO en lista (ejemplos):", missing_en_lista[:50])
-                st.write("En lista pero NO en dosis (ejemplos):", missing_en_dosis[:50])
-
-        registros = []
-
-        # Control primero
-        base = pd.concat([df_lista_use[df_lista_use["CONTROL_FLAG"]],
-                          df_lista_use[~df_lista_use["CONTROL_FLAG"]]], ignore_index=True)
-
-        for _, r in base.iterrows():
-            cod = r["CODIGO"]
-            if not cod or cod.lower() == "nan":
-                continue
-            if cod not in idx.index:
-                continue
-
-            d = idx.loc[cod]
-            if isinstance(d, pd.DataFrame):
-                if "timestamp" in d.columns:
-                    d = d.sort_values(by="timestamp").iloc[-1]
-                else:
-                    d = d.iloc[-1]
-
-            fecha_str = ""
-            if "timestamp" in d and pd.notna(d["timestamp"]):
-                try:
-                    fecha_str = pd.to_datetime(d["timestamp"]).strftime("%d/%m/%Y %H:%M")
-                except Exception:
-                    fecha_str = ""
-
-            registros.append({
-                "PERIODO DE LECTURA": r["PERIODO_NORM"] or "",
-                "CLIENTE": r["CLIENTE"],
-                "CÓDIGO DE DOSÍMETRO": cod,
-                "NOMBRE": r["NOMBRE_COMPLETO"] or r["NOMBRE"],
-                "CÉDULA": r["CÉDULA"],
-                "FECHA DE LECTURA": fecha_str,
-                "TIPO DE DOSÍMETRO": r["TIPO DE DOSÍMETRO"] or "CE",
-                "Hp(10)": float(d.get("hp10dose", 0.0) or 0.0),
-                "Hp(0.07)": float(d.get("hp0.07dose", 0.0) or 0.0),
-                "Hp(3)": float(d.get("hp3dose", 0.0) or 0.0),
-            })
-
-        # Orden: CONTROL primero
-        registros.sort(key=lambda x: (x.get("NOMBRE","").strip().upper() != "CONTROL", x.get("NOMBRE","")))
-        return registros
+    show_debug = st.checkbox("🔎 Debug: sets y coincidencias", value=False)
 
     if btn_proc:
         if df_lista_f.empty:
@@ -321,46 +267,100 @@ if df_lista_raw is not None:
         elif 'dosimeter' not in df_dosis.columns:
             st.error("El archivo de dosis debe tener la columna 'dosimeter'.")
         else:
-            with st.spinner("Procesando…"):
-                registros = construir_registros(df_lista_f, df_dosis)
-                if not registros:
-                    st.warning("No hay coincidencias CÓDIGO_DOSÍMETRO ↔ dosimeter (revisa periodos/códigos).")
-                else:
-                    registros = aplicar_valor_menos_control(registros)
-                    df_final = pd.DataFrame(registros)
+            with st.spinner("Cruzando por CÓDIGO_DOSÍMETRO ↔ dosimeter…"):
+                # ========== MATCH EXCLUSIVO: CODIGO (LISTA) ↔ dosimeter (Dosis) ==========
+                set_lista  = set(df_lista_f["CODIGO"].dropna().astype(str))
+                set_dosis  = set(df_dosis["dosimeter"].dropna().astype(str))
+                inter = set_lista & set_dosis
 
-                    # Limpieza
-                    df_final['PERIODO DE LECTURA'] = (
-                        df_final['PERIODO DE LECTURA'].astype(str)
-                        .str.replace(r'\.+$', '', regex=True).str.strip()
+                if show_debug:
+                    with st.expander("Detalle de coincidencias"):
+                        st.write(f"Códigos en LISTA (filtrada): {len(set_lista)}")
+                        st.write(f"Códigos en DOSIS: {len(set_dosis)}")
+                        st.write(f"Intersección: {len(inter)}")
+                        st.write("Ejemplos intersección:", sorted(list(inter))[:50])
+                        st.write("En dosis pero NO en lista (ejemplos):", sorted(list(set_dosis - set_lista))[:50])
+                        st.write("En lista pero NO en dosis (ejemplos):", sorted(list(set_lista - set_dosis))[:50])
+
+                df_merge = pd.merge(
+                    df_lista_f,
+                    df_dosis,
+                    left_on="CODIGO",
+                    right_on="dosimeter",
+                    how="inner"   # SOLO coincidencias reales
+                )
+
+                if df_merge.empty:
+                    st.warning("⚠️ No se encontraron coincidencias entre CÓDIGO_DOSÍMETRO y dosimeter. Revisa periodos/códigos.")
+                else:
+                    st.success(f"✅ {len(df_merge)} coincidencia(s) por código.")
+                    st.dataframe(df_merge.head(50), use_container_width=True)
+
+                    # ========== Construcción registros + VALOR−CONTROL ==========
+                    # Ordenar CONTROL primero (si hay)
+                    df_merge["_is_control"] = (
+                        df_merge["NOMBRE_COMPLETO"].fillna("").astype(str).str.strip().str.upper().eq("CONTROL") |
+                        df_merge["ETIQUETA"].fillna("").astype(str).str.strip().str.upper().eq("CONTROL")
                     )
-                    if not df_final.empty:
-                        df_final.loc[df_final.index.min(), 'NOMBRE'] = 'CONTROL'
-                        df_final['NOMBRE'] = (
-                            df_final['NOMBRE'].astype(str)
+                    df_merge = pd.concat([df_merge[df_merge["_is_control"]], df_merge[~df_merge["_is_control"]]], ignore_index=True)
+
+                    registros: List[Dict[str, Any]] = []
+                    for _, r in df_merge.iterrows():
+                        ts = r.get("timestamp", pd.NaT)
+                        fecha_str = ""
+                        try:
+                            if pd.notna(ts):
+                                fecha_str = pd.to_datetime(ts).strftime("%d/%m/%Y %H:%M")
+                        except Exception:
+                            fecha_str = ""
+
+                        registros.append({
+                            "PERIODO DE LECTURA": r.get("PERIODO_NORM",""),
+                            "CLIENTE": r.get("CLIENTE",""),
+                            "CÓDIGO DE DOSÍMETRO": r.get("CODIGO",""),
+                            "NOMBRE": r.get("NOMBRE_COMPLETO") or r.get("NOMBRE",""),
+                            "CÉDULA": r.get("CÉDULA",""),
+                            "FECHA DE LECTURA": fecha_str,
+                            "TIPO DE DOSÍMETRO": r.get("TIPO DE DOSÍMETRO","") or "CE",
+                            "Hp(10)": float(r.get("hp10dose", 0.0) or 0.0),
+                            "Hp(0.07)": float(r.get("hp0.07dose", 0.0) or 0.0),
+                            "Hp(3)": float(r.get("hp3dose", 0.0) or 0.0),
+                        })
+
+                    # Aplicar VALOR−CONTROL
+                    if registros:
+                        registros = aplicar_valor_menos_control(registros)
+                        df_final = pd.DataFrame(registros)
+
+                        # Limpieza
+                        df_final['PERIODO DE LECTURA'] = (
+                            df_final['PERIODO DE LECTURA'].astype(str)
                             .str.replace(r'\.+$', '', regex=True).str.strip()
                         )
+                        if not df_final.empty:
+                            df_final.loc[df_final.index.min(), 'NOMBRE'] = 'CONTROL'
+                            df_final['NOMBRE'] = (
+                                df_final['NOMBRE'].astype(str)
+                                .str.replace(r'\.+$', '', regex=True).str.strip()
+                            )
 
-                    st.success(f"¡Listo! Registros generados: {len(df_final)}")
-                    st.dataframe(df_final, use_container_width=True)
-                    st.session_state["df_final"] = df_final
+                        st.markdown("### Resultado (VALOR−CONTROL)")
+                        st.dataframe(df_final, use_container_width=True)
+                        st.session_state["df_final"] = df_final
 
-                    # Exportar Excel
-                    def to_excel_simple(df: pd.DataFrame):
-                        bio = BytesIO()
-                        with pd.ExcelWriter(bio, engine="openpyxl") as w:
-                            df.to_excel(w, index=False, sheet_name="REPORTE")
-                        bio.seek(0); return bio.getvalue()
+                        # Exportar Excel
+                        def to_excel_simple(df: pd.DataFrame):
+                            bio = BytesIO()
+                            with pd.ExcelWriter(bio, engine="openpyxl") as w:
+                                df.to_excel(w, index=False, sheet_name="REPORTE")
+                            bio.seek(0); return bio.getvalue()
 
-                    xlsx = to_excel_simple(df_final)
-                    st.download_button(
-                        "⬇️ Descargar Excel (VALOR−CONTROL)",
-                        data=xlsx,
-                        file_name=f"{(nombre_out.strip() or 'ReporteDosimetria')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                        xlsx = to_excel_simple(df_final)
+                        st.download_button(
+                            "⬇️ Descargar Excel (VALOR−CONTROL)",
+                            data=xlsx,
+                            file_name=f"{(nombre_out.strip() or 'ReporteDosimetria')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
 else:
     st.info("Sube primero la **LISTA DE CÓDIGO** para continuar.")
-
-    st.info("Sube primero la **LISTA DE CÓDIGO** para continuar.")
-
