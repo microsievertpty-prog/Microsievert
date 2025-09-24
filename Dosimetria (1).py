@@ -864,3 +864,318 @@ with tab1:
                 st.error(f"❌ Error al subir: {res.get('error')}")
                 if skipped_cols:
                     st.info("Revisa/crea en Ninox los campos omitidos:\n- " + "\n- ".join(sorted(skipped_cols)))
+
+# ===================== TAB 2 =====================
+with tab2:
+    st.subheader("📊 Reporte — Actual, Anual y de por Vida (por persona) desde Ninox BASE DE DATOS")
+
+    # Sidebar específica de TAB 2
+    with st.sidebar:
+        st.markdown("### ⚙️ Configuración (TAB 2)")
+        header_line1 = st.text_input("Encabezado Excel — Línea 1", "MICROSIEVERT, S.A.", key="tab2_h1")
+        header_line2 = st.text_input("Encabezado Excel — Línea 2", "PH Conardo", key="tab2_h2")
+        header_line3 = st.text_input("Encabezado Excel — Línea 3", "Calle 41 Este, Panamá", key="tab2_h3")
+        header_line4 = st.text_input("Encabezado Excel — Línea 4", "PANAMÁ", key="tab2_h4")
+        logo_file = st.file_uploader("Logo (PNG/JPG) opcional", type=["png","jpg","jpeg"], key="tab2_logo")
+
+    with st.spinner("Cargando datos desde Ninox (BASE DE DATOS)…"):
+        base_records = fetch_all_records(DEFAULT_REPORT_TABLE_ID)
+        base = normalize_df(base_records)
+
+    if base.empty:
+        st.warning("No hay registros en la tabla BASE DE DATOS.")
+        st.stop()
+
+    with st.sidebar:
+        st.markdown("---")
+        per_order = (base.groupby("PERIODO DE LECTURA")["FECHA_DE_LECTURA_DT"].max()
+                    .sort_values(ascending=False).index.astype(str).tolist())
+        per_valid = [p for p in per_order if p.strip().upper() != "CONTROL"]
+        periodo_actual = st.selectbox("Periodo actual", per_valid, index=0 if per_valid else None, key="tab2_periodo")
+
+        usar_anual_automatico = st.checkbox("ANUAL automático (mismo año del periodo actual)", value=True, key="tab2_auto")
+
+        periodos_anteriores = st.multiselect(
+            "Periodos anteriores (solo si ANUAL automático está desmarcado)",
+            [p for p in per_valid if p != periodo_actual],
+            default=[per_valid[1]] if (len(per_valid) > 1) else [], key="tab2_prev"
+        )
+        comp_opts = ["(todas)"] + sorted(base["COMPAÑÍA"].dropna().astype(str).unique().tolist())
+        compania = st.selectbox("Compañía", comp_opts, index=0, key="tab2_comp")
+        tipo_opts = ["(todos)"] + sorted(base["TIPO DE DOSÍMETRO"].dropna().astype(str).unique().tolist())
+        tipo = st.selectbox("Tipo de dosímetro", tipo_opts, index=0, key="tab2_tipo")
+
+        files = st.file_uploader("Archivos de dosis (para filtrar por CÓDIGO DE DOSÍMETRO) — Opcional", type=["csv","xlsx","xls"], accept_multiple_files=True, key="tab2_codes")
+
+    # Filtro compañía/tipo
+    df_company_type = base.copy()
+    if compania != "(todas)":
+        df_company_type = df_company_type[df_company_type["COMPAÑÍA"].astype(str) == compania]
+    if tipo != "(todos)":
+        df_company_type = df_company_type[df_company_type["TIPO DE DOSÍMETRO"].astype(str) == tipo]
+
+    if df_company_type.empty:
+        st.warning("No hay registros que cumplan los filtros de Compañía y/o Tipo de dosímetro.")
+        st.stop()
+
+    # Leer códigos (opcional)
+    def read_codes_from_files(files) -> Set[str]:
+        codes: Set[str] = set()
+        for f in files or []:
+            raw = f.read(); f.seek(0)
+            name = f.name.lower()
+            try:
+                if name.endswith((".xlsx", ".xls")):
+                    df = pd.read_excel(BytesIO(raw))
+                else:
+                    df = None
+                    for enc in ("utf-8-sig","latin-1"):
+                        try:
+                            df = pd.read_csv(BytesIO(raw), sep=None, engine="python", encoding=enc); break
+                        except Exception: continue
+                    if df is None: df = pd.read_csv(BytesIO(raw))
+            except Exception:
+                continue
+            if df is None or df.empty: continue
+            cand = None
+            for c in df.columns:
+                cl = str(c).lower()
+                if any(k in cl for k in ["dosim","código","codigo","wb","dosímetro","dosimetro"]):
+                    cand = c; break
+            if cand is None:
+                for c in df.columns:
+                    if df[c].astype(str).str.contains(r"^WB\d{5,}$", case=False, na=False).any():
+                        cand = c; break
+            if cand is None: cand = df.columns[0]
+            codes |= set(df[cand].astype(str).str.strip())
+        return {c for c in codes if c and c.lower() != "nan"}
+
+    codes_filter: Optional[Set[str]] = read_codes_from_files(files) if files else None
+    if codes_filter:
+        st.success(f"Códigos detectados: {len(codes_filter)}")
+
+    # Construcción DF ACTUAL
+    keys = ["NOMBRE_NORM", "CÉDULA_NORM"]
+    df_curr = df_company_type[df_company_type["PERIODO DE LECTURA"].astype(str) == str(periodo_actual)].copy()
+    if codes_filter:
+        df_curr = df_curr[df_curr["CÓDIGO DE DOSÍMETRO"].isin(codes_filter)]
+
+    if df_curr.empty:
+        st.warning("No hay registros en el período actual con los filtros seleccionados.")
+        st.stop()
+
+    df_curr = df_curr.sort_values("FECHA_DE_LECTURA_DT")
+    personas_actual = set(zip(df_curr["NOMBRE_NORM"], df_curr["CÉDULA_NORM"]))
+
+    df_all_for_people = df_company_type.copy()
+    df_all_for_people["_pair"] = list(zip(df_all_for_people["NOMBRE_NORM"], df_all_for_people["CÉDULA_NORM"]))
+    df_all_for_people = df_all_for_people[df_all_for_people["_pair"].isin(personas_actual)]
+
+    if df_all_for_people.empty:
+        st.warning("No se encontró historial para las personas detectadas en el período actual.")
+        st.stop()
+
+    # ACTUAL
+    gb_curr_sum = df_curr.groupby(keys, as_index=False).agg({
+        "PERIODO DE LECTURA": "last",
+        "COMPAÑÍA": "last",
+        "CÓDIGO DE DOSÍMETRO": "last",
+        "NOMBRE": "last",
+        "CÉDULA": "last",
+        "FECHA_DE_LECTURA_DT": "max",
+        "TIPO DE DOSÍMETRO": "last",
+        "Hp10_NUM": "sum",
+        "Hp007_NUM": "sum",
+        "Hp3_NUM": "sum",
+    })
+    gb_curr_raw = df_curr.groupby(keys).agg({
+        "Hp10_RAW": list,
+        "Hp007_RAW": list,
+        "Hp3_RAW": list
+    }).rename(columns={
+        "Hp10_RAW": "Hp10_ACTUAL_RAW_LIST",
+        "Hp007_RAW": "Hp007_ACTUAL_RAW_LIST",
+        "Hp3_RAW": "Hp3_ACTUAL_RAW_LIST"
+    }).reset_index()
+
+    out = gb_curr_sum.merge(gb_curr_raw, on=keys, how="left").rename(columns={
+        "Hp10_NUM": "Hp10_ACTUAL_NUM_SUM",
+        "Hp007_NUM": "Hp007_ACTUAL_NUM_SUM",
+        "Hp3_NUM": "Hp3_ACTUAL_NUM_SUM",
+    })
+
+    # ANUAL
+    usar_anual_automatico = st.session_state.get("tab2_auto", True)
+    if usar_anual_automatico:
+        if df_curr["FECHA_DE_LECTURA_DT"].notna().any():
+            current_year = int(df_curr["FECHA_DE_LECTURA_DT"].dt.year.mode().iloc[0])
+        else:
+            m = re.search(r"\b(20\d{2}|19\d{2})\b", str(periodo_actual))
+            current_year = int(m.group(1)) if m else datetime.now().year
+
+        df_same_year = df_all_for_people[df_all_for_people["FECHA_DE_LECTURA_DT"].dt.year == current_year].copy()
+        df_prev_same_year = df_same_year[df_same_year["PERIODO DE LECTURA"].astype(str) != str(periodo_actual)].copy()
+
+        gb_prev_sum = df_prev_same_year.groupby(keys).agg({
+            "Hp10_NUM": "sum",
+            "Hp007_NUM": "sum",
+            "Hp3_NUM": "sum"
+        }).rename(columns={
+            "Hp10_NUM": "Hp10_PREV_NUM_SUM",
+            "Hp007_NUM": "Hp007_PREV_NUM_SUM",
+            "Hp3_NUM": "Hp3_PREV_NUM_SUM",
+        }).reset_index()
+
+        gb_prev_raw = df_prev_same_year.groupby(keys).agg({
+            "Hp10_RAW": list,
+            "Hp007_RAW": list,
+            "Hp3_RAW": list
+        }).rename(columns={
+            "Hp10_RAW": "Hp10_PREV_RAW_LIST",
+            "Hp007_RAW": "Hp007_PREV_RAW_LIST",
+            "Hp3_RAW": "Hp3_PREV_RAW_LIST"
+        }).reset_index()
+
+        out = out.merge(gb_prev_sum, on=keys, how="left").merge(gb_prev_raw, on=keys, how="left")
+
+    else:
+        df_prev = df_all_for_people[df_all_for_people["PERIODO DE LECTURA"].astype(str).isin(st.session_state.get("tab2_prev", []))].copy()
+
+        gb_prev_sum = df_prev.groupby(keys).agg({
+            "Hp10_NUM": "sum",
+            "Hp007_NUM": "sum",
+            "Hp3_NUM": "sum"
+        }).rename(columns={
+            "Hp10_NUM": "Hp10_PREV_NUM_SUM",
+            "Hp007_NUM": "Hp007_PREV_NUM_SUM",
+            "Hp3_NUM": "Hp3_PREV_NUM_SUM",
+        }).reset_index()
+
+        gb_prev_raw = df_prev.groupby(keys).agg({
+            "Hp10_RAW": list,
+            "Hp007_RAW": list,
+            "Hp3_RAW": list
+        }).rename(columns={
+            "Hp10_RAW": "Hp10_PREV_RAW_LIST",
+            "Hp007_RAW": "Hp007_PREV_RAW_LIST",
+            "Hp3_RAW": "Hp3_PREV_RAW_LIST"
+        }).reset_index()
+
+        out = out.merge(gb_prev_sum, on=keys, how="left").merge(gb_prev_raw, on=keys, how="left")
+
+    # VIDA
+    gb_life_sum = df_all_for_people.groupby(keys).agg({
+        "Hp10_NUM": "sum",
+        "Hp007_NUM": "sum",
+        "Hp3_NUM": "sum"
+    }).rename(columns={
+        "Hp10_NUM": "Hp10_LIFE_NUM_SUM",
+        "Hp007_NUM": "Hp007_LIFE_NUM_SUM",
+        "Hp3_NUM": "Hp3_LIFE_NUM_SUM",
+    }).reset_index()
+
+    gb_life_raw = df_all_for_people.groupby(keys).agg({
+        "Hp10_RAW": list,
+        "Hp007_RAW": list,
+        "Hp3_RAW": list
+    }).rename(columns={
+        "Hp10_RAW": "Hp10_LIFE_RAW_LIST",
+        "Hp007_RAW": "Hp007_LIFE_RAW_LIST",
+        "Hp3_RAW": "Hp3_LIFE_RAW_LIST"
+    }).reset_index()
+
+    out = out.merge(gb_life_sum, on=keys, how="left").merge(gb_life_raw, on=keys, how="left")
+
+    # Rellenos y columnas finales
+    for c in [
+        "Hp10_ACTUAL_NUM_SUM","Hp007_ACTUAL_NUM_SUM","Hp3_ACTUAL_NUM_SUM",
+        "Hp10_PREV_NUM_SUM","Hp007_PREV_NUM_SUM","Hp3_PREV_NUM_SUM",
+        "Hp10_LIFE_NUM_SUM","Hp007_LIFE_NUM_SUM","Hp3_LIFE_NUM_SUM",
+    ]:
+        if c not in out.columns: out[c] = 0.0
+        out[c] = out[c].fillna(0.0)
+
+    def fmt_fecha(dtval):
+        if pd.isna(dtval): return ""
+        try: return pd.to_datetime(dtval).strftime("%d/%m/%Y %H:%M")
+        except Exception: return str(dtval)
+
+    out["Hp (10) ACTUAL"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_ACTUAL_RAW_LIST", []), r["Hp10_ACTUAL_NUM_SUM"]), axis=1)
+    out["Hp (0.07) ACTUAL"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_ACTUAL_RAW_LIST", []), r["Hp007_ACTUAL_NUM_SUM"]), axis=1)
+    out["Hp (3) ACTUAL"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_ACTUAL_RAW_LIST",  []), r["Hp3_ACTUAL_NUM_SUM"]),  axis=1)
+
+    out["Hp (10) ANUAL"] = out.apply(lambda r: pm_or_sum(
+        merge_raw_lists(r.get("Hp10_ACTUAL_RAW_LIST"), r.get("Hp10_PREV_RAW_LIST")),
+        float(r["Hp10_ACTUAL_NUM_SUM"]) + float(r["Hp10_PREV_NUM_SUM"])
+    ), axis=1)
+    out["Hp (0.07) ANUAL"] = out.apply(lambda r: pm_or_sum(
+        merge_raw_lists(r.get("Hp007_ACTUAL_RAW_LIST"), r.get("Hp007_PREV_RAW_LIST")),
+        float(r["Hp007_ACTUAL_NUM_SUM"]) + float(r["Hp007_PREV_NUM_SUM"])
+    ), axis=1)
+    out["Hp (3) ANUAL"] = out.apply(lambda r: pm_or_sum(
+        merge_raw_lists(r.get("Hp3_ACTUAL_RAW_LIST"), r.get("Hp3_PREV_RAW_LIST")),
+        float(r["Hp3_ACTUAL_NUM_SUM"]) + float(r["Hp3_PREV_NUM_SUM"])
+    ), axis=1)
+
+    out["Hp (10) VIDA"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_LIFE_RAW_LIST", []), r["Hp10_LIFE_NUM_SUM"]), axis=1)
+    out["Hp (0.07) VIDA"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_LIFE_RAW_LIST", []), r["Hp007_LIFE_NUM_SUM"]), axis=1)
+    out["Hp (3) VIDA"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_LIFE_RAW_LIST",  []), r["Hp3_LIFE_NUM_SUM"]),  axis=1)
+
+    out["FECHA Y HORA DE LECTURA"] = out["FECHA_DE_LECTURA_DT"].apply(fmt_fecha)
+    out["PERIODO DE LECTURA"] = st.session_state.get("tab2_periodo", "")
+
+    out["__is_control"] = out["NOMBRE"].fillna("").astype(str).str.strip().str.upper().eq("CONTROL")
+    out = out.sort_values(["__is_control","NOMBRE","CÉDULA"], ascending=[False, True, True])
+
+    FINAL_COLS = [
+        "PERIODO DE LECTURA","COMPAÑÍA","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+        "FECHA Y HORA DE LECTURA","TIPO DE DOSÍMETRO",
+        "Hp (10) ACTUAL","Hp (0.07) ACTUAL","Hp (3) ACTUAL",
+        "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+        "Hp (10) VIDA","Hp (0.07) VIDA","Hp (3) VIDA",
+    ]
+    for c in FINAL_COLS:
+        if c not in out.columns: out[c] = ""
+    out = out[FINAL_COLS]
+
+    st.markdown("#### Reporte final (vista previa)")
+    st.dataframe(out, use_container_width=True, hide_index=True)
+
+    # Descargas
+    csv_bytes = out.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "⬇️ Descargar CSV (UTF-8 con BOM)",
+        data=csv_bytes,
+        file_name=f"reporte_dosimetria_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv",
+        key="tab2_dl_csv"
+    )
+
+    def to_excel_simple(df: pd.DataFrame, sheet_name="Reporte"):
+        bio = BytesIO()
+        with pd.ExcelWriter(bio, engine="openpyxl") as w:
+            df.to_excel(w, index=False, sheet_name=sheet_name)
+        bio.seek(0); return bio.getvalue()
+
+    xlsx_simple = to_excel_simple(out)
+    st.download_button(
+        "⬇️ Descargar Excel (tabla simple)",
+        data=xlsx_simple,
+        file_name=f"reporte_dosimetria_tabla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="tab2_dl_xlsx_simple"
+    )
+
+    # Excel plantilla (con Cliente en I2:P2)
+    header_lines = [st.session_state.get("tab2_h1",""), st.session_state.get("tab2_h2",""),
+                    st.session_state.get("tab2_h3",""), st.session_state.get("tab2_h4","")]
+    logo_bytes = st.session_state.get("tab2_logo").read() if st.session_state.get("tab2_logo") is not None else None
+
+    xlsx_fmt = build_formatted_excel(out.copy(), header_lines, logo_bytes)
+    st.download_button(
+        "⬇️ Descargar Excel (formato plantilla)",
+        data=xlsx_fmt,
+        file_name=f"reporte_dosimetria_plantilla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="tab2_dl_xlsx_fmt"
+    )
