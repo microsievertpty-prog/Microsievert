@@ -12,7 +12,6 @@ from typing import List, Dict, Any, Optional, Set
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter, column_index_from_string
-from openpyxl.drawing.image import Image as XLImage
 
 # ===================== NINOX CONFIG =====================
 API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"
@@ -230,12 +229,12 @@ def leer_dosis(upload):
         if k in df.columns: df[k] = pd.to_numeric(df[k], errors='coerce').fillna(0.0)
         else: df[k] = 0.0
 
-    # 🔴 Normalización fuerte de códigos del archivo
+    # Normalización fuerte de códigos del archivo
     if 'dosimeter' in df.columns:
         df['dosimeter'] = (
             df['dosimeter'].astype(str)
             .str.upper()
-            .str.replace(r"[^A-Z0-9]", "", regex=True)  # quita guiones/espacios/etc.
+            .str.replace(r"[^A-Z0-9]", "", regex=True)
             .str.strip()
         )
 
@@ -248,6 +247,7 @@ def leer_dosis(upload):
 def normalize_lista_codigo(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
     Normaliza columnas de 'LISTA DE CODIGO' y el código del dosímetro.
+    Fallback del código: CÓDIGO_DOSÍMETRO → CÓDIGO USUARIO → CÓDIGO_CLIENTE
     """
     df = df_raw.copy()
     needed = [
@@ -262,13 +262,15 @@ def normalize_lista_codigo(df_raw: pd.DataFrame) -> pd.DataFrame:
     ap = df["APELLIDO"].fillna("").astype(str).str.strip()
     df["NOMBRE_COMPLETO"] = (df["NOMBRE"] + " " + ap).str.strip().replace({"^$": ""}, regex=True)
 
-    # 🔴 Normalización fuerte de códigos de Ninox
-    df["CODIGO"] = (
-        df["CÓDIGO_DOSÍMETRO"].fillna("").astype(str)
-        .str.upper()
-        .str.replace(r"[^A-Z0-9]", "", regex=True)
-        .str.strip()
-    )
+    # ---- Código normalizado con fallback
+    def pick_code(row):
+        for k in ["CÓDIGO_DOSÍMETRO", "CÓDIGO USUARIO", "CÓDIGO_CLIENTE"]:
+            v = str(row.get(k, "") or "").upper()
+            v = re.sub(r"[^A-Z0-9]", "", v)
+            if v and v != "NAN":
+                return v
+        return ""
+    df["CODIGO"] = df.apply(pick_code, axis=1)
 
     df["CLIENTE"] = df["CLIENTE"].fillna("").astype(str).str.strip()
     df["PERIODO_NORM"] = (
@@ -298,10 +300,12 @@ def construir_registros_desde_lista_codigo(df_lista: pd.DataFrame,
     df_d["dosimeter"] = df_d["dosimeter"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True).str.strip()
     idx = df_d.set_index("dosimeter")
 
-    # 🔎 Debug opcional
+    # Debug de listas de códigos (para mostrar si no hay match)
+    codes_ninox = sorted(set(base["CODIGO"]) - {""})
+    codes_file  = sorted(set(df_d["dosimeter"]) - {""})
+
+    # Checkbox de debug manual
     if st.checkbox("Mostrar debug de códigos", value=False, key="dbg_codes"):
-        codes_ninox = sorted(set(base["CODIGO"]) - {""})
-        codes_file  = sorted(set(df_d["dosimeter"]) - {""})
         inter = sorted(set(codes_ninox).intersection(codes_file))
         st.write(f"Códigos Ninox: {len(codes_ninox)} | Archivo: {len(codes_file)} | Intersección: {len(inter)}")
         st.write("Ejemplos intersección:", inter[:20])
@@ -336,6 +340,14 @@ def construir_registros_desde_lista_codigo(df_lista: pd.DataFrame,
             "Hp(3)":   float(d.get("hp3dose", 0.0) or 0.0),
             "_IS_CONTROL": bool(r["CONTROL_FLAG"]),
         })
+
+    # Si no hubo coincidencias, muestra debug automático
+    if not registros:
+        with st.expander("Debug de coincidencias (no se encontraron)"):
+            inter = sorted(set(codes_ninox).intersection(codes_file))
+            st.write(f"Códigos Ninox: {len(codes_ninox)} | Archivo: {len(codes_file)} | Intersección: {len(inter)}")
+            st.write("Ejemplos Ninox:", codes_ninox[:30])
+            st.write("Ejemplos Archivo:", codes_file[:30])
 
     registros.sort(key=lambda x: (not x.get("_IS_CONTROL", False), x.get("NOMBRE","")))
     for r in registros: r.pop("_IS_CONTROL", None)
@@ -610,15 +622,15 @@ with tab2:
         per_valid = [p for p in per_order if p.strip().upper() != "CONTROL"]
         periodo_actual = st.selectbox("Periodo actual", per_valid, index=0 if per_valid else None, key="tab2_periodo")
 
-        usar_anual_automatico = st.checkbox("ANUAL automático (mismo año del periodo actual)", value=True, key="tab2_auto")
+        st.checkbox("ANUAL automático (mismo año del periodo actual)", value=True, key="tab2_auto")
 
-        periodos_anteriores = st.multiselect(
-            "Periodos anteriores (solo si ANUAL automático está desmarcado)",
+        st.multiselect("Periodos anteriores (solo si ANUAL automático está desmarcado)",
             [p for p in per_valid if p != periodo_actual],
-            default=[per_valid[1]] if (len(per_valid) > 1) else [], key="tab2_prev"
-        )
+            default=[per_valid[1]] if (len(per_valid) > 1) else [], key="tab2_prev")
+
         comp_opts = ["(todas)"] + sorted(base["CLIENTE"].dropna().astype(str).unique().tolist())
         compania = st.selectbox("Cliente", comp_opts, index=0, key="tab2_comp")
+
         tipo_opts = ["(todos)"] + sorted(base["TIPO DE DOSÍMETRO"].dropna().astype(str).unique().tolist())
         tipo = st.selectbox("Tipo de dosímetro", tipo_opts, index=0, key="tab2_tipo")
 
@@ -712,7 +724,7 @@ with tab2:
         "Hp3_NUM": "Hp3_ACTUAL_NUM_SUM",
     })
 
-    # ANUAL (suma Actual + Previos)  ✅ corregido el paréntesis
+    # ANUAL (suma Actual + Previos)
     usar_anual_automatico = st.session_state.get("tab2_auto", True)
     if usar_anual_automatico:
         if df_curr["FECHA_DE_LECTURA_DT"].notna().any():
