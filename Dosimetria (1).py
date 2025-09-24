@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 # Streamlit app: CRUCE EXCLUSIVO por CÓDIGO_DOSÍMETRO (LISTA) ↔ dosimeter (Dosis)
 # Lee AMBAS tablas desde ARCHIVOS (CSV/XLS/XLSX), normaliza códigos y periodos (AGO-25 → AGOSTO 2025),
-# filtra por uno o varios periodos (vacío = TODOS), calcula VALOR−CONTROL y exporta Excel.
+# permite filtrar por uno o VARIOS periodos (vacío = TODOS), deduplica:
+#   - LISTA: una fila por (PERIODO_NORM, CODIGO)
+#   - DOSIS: lectura más reciente por dosimeter
+# calcula VALOR−CONTROL y exporta Excel.
 
 import re
 from io import BytesIO
@@ -12,21 +15,21 @@ import pandas as pd
 import streamlit as st
 
 # ===================== UI / App =====================
-st.set_page_config(page_title="Dosimetría — Match CÓDIGO_DOSÍMETRO ↔ dosimeter", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="Dosimetría — Match por Código (archivos)", page_icon="🧪", layout="wide")
 st.title("🧪 Dosimetría — Match exacto CÓDIGO_DOSÍMETRO ↔ dosimeter (archivos)")
-st.caption("Sube tu LISTA DE CÓDIGO y el archivo de dosis. El cruce se hace SOLO por el código normalizado.")
+st.caption("Sube tu **LISTA DE CÓDIGO** y el **archivo de dosis**. El cruce se hace SOLO por el código normalizado.")
 
 # ===================== Helpers =====================
 def _norm_code(x: str) -> str:
     """
-    Normaliza un código a formato estándar 'WB' + 6 dígitos.
+    Normaliza un código a formato 'WB' + 6 dígitos.
     Acepta: '57', 'WB57', 'WB000057', '  /WB000057 ' → 'WB000057'
     """
     if x is None:
         return ""
     s = str(x).strip().upper()
-    s = s.replace("\u00A0", " ").strip()      # NBSP
-    s = re.sub(r"[^A-Z0-9]", "", s)           # quita todo lo no alfanumérico
+    s = s.replace("\u00A0", " ").strip()  # NBSP
+    s = re.sub(r"[^A-Z0-9]", "", s)       # quita lo no alfanumérico
 
     m_dig = re.fullmatch(r"(\d+)", s)
     if m_dig:
@@ -38,11 +41,11 @@ def _norm_code(x: str) -> str:
 
     if re.fullmatch(r"WB\d{6}", s):
         return s
-    return s  # deja pasar códigos no WB (si existieran)
+    return s  # deja pasar si no es WB, por si necesitas otros prefijos
 
 def _read_csv_robusto(upload) -> pd.DataFrame:
     """
-    Lectura robusta de CSV probando codificaciones y separadores para evitar UnicodeDecodeError.
+    Lectura robusta de CSV probando codificaciones y separadores (evita UnicodeDecodeError).
     """
     raw = upload.read()
     upload.seek(0)
@@ -289,7 +292,7 @@ if df_lista_raw is not None:
     with c2:
         btn_proc = st.button("✅ Procesar (match por código)", type="primary", use_container_width=True)
 
-    show_debug = st.checkbox("🔎 Debug: sets y coincidencias", value=False)
+    show_debug = st.checkbox("🔎 Debug: sets, duplicados y coincidencias", value=False)
 
     if btn_proc:
         if df_lista_f.empty:
@@ -300,33 +303,50 @@ if df_lista_raw is not None:
             st.error("El archivo de dosis debe tener la columna 'dosimeter'.")
         else:
             with st.spinner("Cruzando por CÓDIGO_DOSÍMETRO ↔ dosimeter…"):
-                # ========== MATCH EXCLUSIVO: CODIGO (LISTA) ↔ dosimeter (Dosis) ==========
-                set_lista  = set(df_lista_f["CODIGO"].dropna().astype(str))
-                set_dosis  = set(df_dosis["dosimeter"].dropna().astype(str))
-                inter = set_lista & set_dosis
+                # ================= DEDUPE antes del merge =================
+                # 1) LISTA: una fila por (PERIODO_NORM, CODIGO)
+                dup_cols = ["PERIODO_NORM", "CODIGO"]
+                d_mask = df_lista_f.duplicated(dup_cols, keep=False)
+                if show_debug and d_mask.any():
+                    with st.expander("Duplicados en LISTA por (PERIODO_NORM, CODIGO)"):
+                        st.write(df_lista_f.loc[d_mask, ["PERIODO_NORM","CODIGO","NOMBRE_COMPLETO","ETIQUETA"]].head(50))
+                df_lista_f = df_lista_f.drop_duplicates(dup_cols, keep="last").copy()
+
+                # 2) DOSIS: lectura más reciente por dosimeter (si hay timestamp)
+                df_dosis_g = df_dosis.copy()
+                if "timestamp" in df_dosis_g.columns:
+                    df_dosis_g = df_dosis_g.sort_values("timestamp")
+                    idx = df_dosis_g.groupby("dosimeter")["timestamp"].idxmax()
+                    df_dosis_g = df_dosis_g.loc[idx].copy()
+                else:
+                    df_dosis_g = df_dosis_g.drop_duplicates("dosimeter", keep="last").copy()
 
                 if show_debug:
-                    with st.expander("Detalle de coincidencias"):
+                    with st.expander("Resumen de sets (tras dedupe)"):
+                        set_lista  = set(df_lista_f["CODIGO"].dropna().astype(str))
+                        set_dosis  = set(df_dosis_g["dosimeter"].dropna().astype(str))
+                        inter = set_lista & set_dosis
                         st.write(f"Códigos en LISTA (filtrada): {len(set_lista)}")
-                        st.write(f"Códigos en DOSIS: {len(set_dosis)}")
+                        st.write(f"Códigos en DOSIS (dedupe): {len(set_dosis)}")
                         st.write(f"Intersección: {len(inter)}")
                         st.write("Ejemplos intersección:", sorted(list(inter))[:50])
-                        st.write("En dosis pero NO en lista (ejemplos):", sorted(list(set_dosis - set_lista))[:50])
-                        st.write("En lista pero NO en dosis (ejemplos):", sorted(list(set_lista - set_dosis))[:50])
 
+                # ========== CRUCE EXCLUSIVO: CODIGO (LISTA) ↔ dosimeter (Dosis) ==========
                 df_merge = pd.merge(
                     df_lista_f,
-                    df_dosis,
+                    df_dosis_g,
                     left_on="CODIGO",
                     right_on="dosimeter",
-                    how="inner"   # SOLO coincidencias reales
+                    how="inner"
                 )
 
                 if df_merge.empty:
                     st.warning("⚠️ No se encontraron coincidencias entre CÓDIGO_DOSÍMETRO y dosimeter. Revisa periodos/códigos.")
                 else:
                     st.success(f"✅ {len(df_merge)} coincidencia(s) por código.")
-                    st.dataframe(df_merge.head(50), use_container_width=True)
+                    if show_debug:
+                        with st.expander("Primeras coincidencias"):
+                            st.dataframe(df_merge.head(50), use_container_width=True)
 
                     # ========== Construcción registros + VALOR−CONTROL ==========
                     # Ordenar CONTROL primero (si hay)
