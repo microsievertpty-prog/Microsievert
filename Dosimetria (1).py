@@ -12,7 +12,36 @@ st.set_page_config(page_title="Dosimetría — Solo archivos", page_icon="🧪",
 st.title("🧪 Dosimetría — Cargar LISTA DE CÓDIGO y Dosis (sin Ninox)")
 st.caption("Sube tu LISTA DE CÓDIGO (tabla de lectura) y tu archivo de dosis. Cruce + VALOR−CONTROL + exportación.")
 
-# ===================== Lectores / Normalizadores =====================
+# ===================== Helpers =====================
+def _norm_code(x: str) -> str:
+    """
+    Normaliza un código a formato 'WB' + 6 dígitos.
+    - Quita NBSP, espacios, guiones, etc.
+    - Acepta entradas como 'WB57', '57', 'WB000057', ' wb 000057 ' → 'WB000057'
+    """
+    if x is None:
+        return ""
+    s = str(x).strip().upper()
+    s = s.replace("\u00A0", " ").strip()     # NBSP
+    s = re.sub(r"[^A-Z0-9]", "", s)          # quita no alfanumérico
+
+    # Solo dígitos => WB + 6 dígitos
+    m_dig = re.fullmatch(r"(\d+)", s)
+    if m_dig:
+        num = m_dig.group(1).zfill(6)
+        return f"WB{num}"
+
+    # WB + dígitos => pad a 6
+    m_wb = re.fullmatch(r"WB(\d+)", s)
+    if m_wb:
+        num = m_wb.group(1).zfill(6)
+        return f"WB{num}"
+
+    # Si ya es correcto, deja; en otro caso, devuelve lo limpiado
+    if re.fullmatch(r"WB\d{6}", s):
+        return s
+    return s
+
 def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
     """
     Lee LISTA DE CÓDIGO desde CSV/XLS/XLSX y devuelve un DataFrame
@@ -25,20 +54,19 @@ def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
     if name.endswith((".xlsx", ".xls")):
         df = pd.read_excel(upload, sheet_name=0)
     else:
-        # Intenta autodetectar separador
         try:
             df = pd.read_csv(upload, sep=None, engine="python")
         except Exception:
             upload.seek(0)
             df = pd.read_csv(upload)
 
-    # Normaliza encabezados a minúsculas y con espacios simples
+    # Normaliza encabezados a minúsculas con espacios simples
     norm = (df.columns.astype(str)
             .str.strip().str.lower()
             .str.replace(r"\s+", " ", regex=True))
     df.columns = norm
 
-    # Mapeo flexible: (target -> posibles nombres en el archivo)
+    # Mapeo flexible
     candidates = {
         "cédula":             ["cédula","cedula","id","documento","ced"],
         "código usuario":     ["código usuario","codigo usuario","codigo_usuario","codigo de usuario"],
@@ -48,7 +76,6 @@ def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
         "cliente":            ["cliente","compañía","compania","empresa"],
         "código_cliente":     ["código cliente","codigo cliente","codigo_cliente","id cliente"],
         "etiqueta":           ["etiqueta","tag","label"],
-        # Aceptamos varias formas, incl. 'dosimeter' del laboratorio:
         "código_dosímetro":   ["código dosímetro","codigo dosimetro","codigo_dosimetro","dosímetro","dosimetro","dosimeter","codigo"],
         "periodo de lectura": ["periodo de lectura","período de lectura","periodo","período","periodo lectura","lectura periodo"],
         "tipo de dosímetro":  ["tipo de dosímetro","tipo dosimetro","tipo_dosimetro","tipo"],
@@ -62,13 +89,7 @@ def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
     return out
 
 def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Asegura columnas y crea derivados:
-    - NOMBRE_COMPLETO
-    - CODIGO (CÓDIGO_DOSÍMETRO normalizado)
-    - PERIODO_NORM (mayúsculas, espacios simples, sin puntos al final)
-    - CONTROL_FLAG (si la fila es control)
-    """
+    """Estándar + derivados para la LISTA DE CÓDIGO."""
     needed = [
         "CÉDULA","CÓDIGO USUARIO","NOMBRE","APELLIDO","FECHA DE NACIMIENTO",
         "CLIENTE","CÓDIGO_CLIENTE","ETIQUETA","CÓDIGO_DOSÍMETRO",
@@ -81,7 +102,7 @@ def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
     ap = df["APELLIDO"].fillna("").astype(str).str.strip()
     df["NOMBRE_COMPLETO"] = (df["NOMBRE"].fillna("").astype(str).str.strip() + " " + ap).str.strip()
 
-    df["CODIGO"] = df["CÓDIGO_DOSÍMETRO"].fillna("").astype(str).str.strip().str.upper()
+    df["CODIGO"] = df["CÓDIGO_DOSÍMETRO"].fillna("").astype(str).map(_norm_code)
 
     df["PERIODO_NORM"] = (
         df["PERIODO DE LECTURA"].fillna("").astype(str).str.strip().str.upper()
@@ -105,7 +126,6 @@ def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
 def leer_dosis(upload) -> Optional[pd.DataFrame]:
     """
     Lee archivo de dosis con columnas (dosimeter, hp10dose, hp0.07dose, hp3dose, timestamp opcional).
-    Acepta CSV/XLS/XLSX y nombres alternativos.
     """
     if not upload:
         return None
@@ -120,14 +140,14 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
     else:
         df = pd.read_excel(upload)
 
-    # Normaliza encabezados compactos
+    # Encabezados compactos
     norm = (df.columns.astype(str).str.strip().str.lower()
             .str.replace(' ', '', regex=False)
             .str.replace('(', '').str.replace(')', '')
             .str.replace('.', '', regex=False))
     df.columns = norm
 
-    # Mapear campos comunes
+    # Mapas de nombres
     if 'dosimeter' not in df.columns:
         for alt in ['dosimetro','codigo','codigodosimetro','codigo_dosimetro']:
             if alt in df.columns:
@@ -150,11 +170,10 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
 
     if 'dosimeter' in df.columns:
-        df['dosimeter'] = df['dosimeter'].astype(str).str.strip().str.upper()
+        df['dosimeter'] = df['dosimeter'].astype(str).map(_norm_code)
 
     return df
 
-# ===================== Lógica de VALOR − CONTROL =====================
 def periodo_desde_fecha(periodo_str: str, fecha_str: str) -> str:
     per = (periodo_str or "").strip().upper()
     per = re.sub(r'\.+$', '', per).strip()
@@ -172,10 +191,7 @@ def periodo_desde_fecha(periodo_str: str, fecha_str: str) -> str:
         return per or ""
 
 def aplicar_valor_menos_control(registros: List[Dict[str,Any]]):
-    """
-    El primer registro debe ser CONTROL. Resta su Hp a los demás.
-    Si la diferencia < 0.005 → 'PM'.
-    """
+    """Asume primer registro = control. Resta control; si diff < 0.005 => 'PM'."""
     if not registros: return registros
     base10 = float(registros[0]['Hp(10)'])
     base07 = float(registros[0]['Hp(0.07)'])
@@ -205,7 +221,7 @@ if df_lista_raw is not None:
     # Normaliza lista
     df_lista = normalize_lista_codigo(df_lista_raw)
 
-    # Selector multi-periodo (vacío = todos)
+    # Periodos
     periodos = sorted([p for p in df_lista["PERIODO_NORM"].dropna().astype(str).unique() if p.strip() != ""])
     st.markdown("#### Filtrar por PERIODO DE LECTURA (elige uno o varios; en blanco = TODOS)")
     periods_sel = st.multiselect("PERIODO DE LECTURA", options=periodos, default=[])
@@ -222,19 +238,38 @@ if df_lista_raw is not None:
         st.success(f"Dosis cargadas: {len(df_dosis)} fila(s)")
         st.dataframe(df_dosis.head(20), use_container_width=True)
 
-    # ============ Procesar ============
+    # Procesar
     c1, c2 = st.columns([1,1])
     with c1:
         nombre_out = st.text_input("Nombre archivo (sin extensión)", value=f"ReporteDosimetria_{datetime.now().strftime('%Y-%m-%d')}")
     with c2:
         btn_proc = st.button("✅ Procesar", type="primary", use_container_width=True)
 
+    # Debug toggle
+    show_debug = st.checkbox("🔎 Mostrar debug de códigos y coincidencias", value=False)
+
     def construir_registros(df_lista_use: pd.DataFrame, df_dosis_use: pd.DataFrame) -> List[Dict[str,Any]]:
         if df_lista_use.empty or df_dosis_use is None or df_dosis_use.empty:
             return []
-        # Índice por dosímetro del archivo de dosis
+
+        # Índice y sets → diagnósticos
         idx = df_dosis_use.set_index("dosimeter")
-        registros, miss = [], []
+        set_dosis  = set(idx.index.dropna())
+        set_lista  = set(df_lista_use["CODIGO"].dropna().astype(str))
+        inter = set_dosis & set_lista
+        missing_en_lista = sorted(set_dosis - set_lista)
+        missing_en_dosis = sorted(set_lista - set_dosis)
+
+        if show_debug:
+            with st.expander("Coincidencias (debug)"):
+                st.write(f"Códigos en DOSIS: {len(set_dosis)}")
+                st.write(f"Códigos en LISTA: {len(set_lista)}")
+                st.write(f"Intersección: {len(inter)}")
+                st.write("Ejemplos intersección:", sorted(list(inter))[:20])
+                st.write("En dosis pero NO en lista (ejemplos):", missing_en_lista[:50])
+                st.write("En lista pero NO en dosis (ejemplos):", missing_en_dosis[:50])
+
+        registros = []
 
         # Control primero
         base = pd.concat([df_lista_use[df_lista_use["CONTROL_FLAG"]],
@@ -245,18 +280,15 @@ if df_lista_raw is not None:
             if not cod or cod.lower() == "nan":
                 continue
             if cod not in idx.index:
-                miss.append(cod)
                 continue
 
             d = idx.loc[cod]
             if isinstance(d, pd.DataFrame):
-                # Si hay varias lecturas, toma la última por timestamp (si existe)
                 if "timestamp" in d.columns:
                     d = d.sort_values(by="timestamp").iloc[-1]
                 else:
                     d = d.iloc[-1]
 
-            # Formato fecha lectura (opcional)
             fecha_str = ""
             if "timestamp" in d and pd.notna(d["timestamp"]):
                 try:
@@ -276,11 +308,6 @@ if df_lista_raw is not None:
                 "Hp(0.07)": float(d.get("hp0.07dose", 0.0) or 0.0),
                 "Hp(3)": float(d.get("hp3dose", 0.0) or 0.0),
             })
-
-        # Debug opcional
-        if st.checkbox("📎 Mostrar debug de códigos no coincidentes"):
-            st.write("Códigos en dosis NO encontrados en LISTA:", sorted(set(idx.index) - set(base["CODIGO"])))
-            st.write("Códigos en LISTA sin dosis:", sorted(set(miss)))
 
         # Orden: CONTROL primero
         registros.sort(key=lambda x: (x.get("NOMBRE","").strip().upper() != "CONTROL", x.get("NOMBRE","")))
@@ -302,7 +329,7 @@ if df_lista_raw is not None:
                     registros = aplicar_valor_menos_control(registros)
                     df_final = pd.DataFrame(registros)
 
-                    # Limpiezas de texto
+                    # Limpieza
                     df_final['PERIODO DE LECTURA'] = (
                         df_final['PERIODO DE LECTURA'].astype(str)
                         .str.replace(r'\.+$', '', regex=True).str.strip()
@@ -318,7 +345,7 @@ if df_lista_raw is not None:
                     st.dataframe(df_final, use_container_width=True)
                     st.session_state["df_final"] = df_final
 
-                    # ===================== Descargar Excel =====================
+                    # Exportar Excel
                     def to_excel_simple(df: pd.DataFrame):
                         bio = BytesIO()
                         with pd.ExcelWriter(bio, engine="openpyxl") as w:
@@ -334,3 +361,6 @@ if df_lista_raw is not None:
                     )
 else:
     st.info("Sube primero la **LISTA DE CÓDIGO** para continuar.")
+
+    st.info("Sube primero la **LISTA DE CÓDIGO** para continuar.")
+
