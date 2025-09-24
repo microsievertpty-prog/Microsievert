@@ -3,7 +3,7 @@ import io, re, requests, pandas as pd, streamlit as st
 from datetime import datetime
 from io import BytesIO
 from dateutil.parser import parse as dtparse
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Any, Optional, Set
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
@@ -32,14 +32,19 @@ st.set_page_config(page_title="Microsievert - Dosimetría", page_icon="🧪", la
 st.title("🧪 Sistema de Gestión de Dosimetría — Microsievert")
 st.caption("Ninox + VALOR−CONTROL + Reporte Actual/Anual/Vida + Exportación")
 
-for k, v in {
-    "df_final": None, "df_participantes": None
-}.items():
+for k, v in {"df_final": None, "df_participantes": None}.items():
     if k not in st.session_state: st.session_state[k] = v
 
 # ===================== Ninox helpers =====================
 def ninox_headers():
     return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
+
+@st.cache_data(ttl=300, show_spinner=False)
+def ninox_list_tables(team_id: str, db_id: str):
+    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
+    r = requests.get(url, headers=ninox_headers(), timeout=30)
+    r.raise_for_status()
+    return r.json()
 
 def ninox_fetch_records_lazy(table_id: str, per_page: int = 1000, timeout_s: int = 8) -> pd.DataFrame:
     url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
@@ -108,7 +113,7 @@ def pm_or_sum(raws, numeric_sum) -> Any:
     else: arr = [raws]
     vals = [str(x).upper() for x in arr if str(x).strip() != ""]
     if vals and all(v == "PM" for v in vals): return "PM"
-    try: total = float(numeric_sum); 
+    try: total = float(numeric_sum)
     except Exception: total = 0.0
     return round2(total)
 
@@ -122,14 +127,16 @@ def merge_raw_lists(*vals):
         else: out.append(v)
     return out
 
-# ===================== Lectura dosis =====================
+# ===================== Lectura dosis (CSV/XLS) =====================
 def leer_dosis(upload):
     if not upload: return None
     name = upload.name.lower()
     if name.endswith(".csv"):
-        try: df = pd.read_csv(upload, delimiter=';', engine='python')
+        try:
+            df = pd.read_csv(upload, delimiter=';', engine='python')
         except Exception:
-            upload.seek(0); df = pd.read_csv(upload)
+            upload.seek(0)
+            df = pd.read_csv(upload)
     else:
         df = pd.read_excel(upload)
 
@@ -144,7 +151,7 @@ def leer_dosis(upload):
             if alt in df.columns:
                 df.rename(columns={alt: 'dosimeter'}, inplace=True); break
 
-    for cand in ['hp10dosecorr','hp10dose','hp10']: 
+    for cand in ['hp10dosecorr','hp10dose','hp10']:
         if cand in df.columns: df.rename(columns={cand: 'hp10dose'}, inplace=True); break
     for cand in ['hp007dosecorr','hp007dose','hp007','hp007corr','hp007dosecorr']:
         if cand in df.columns: df.rename(columns={cand: 'hp0.07dose'}, inplace=True); break
@@ -163,7 +170,7 @@ def leer_dosis(upload):
 
     return df
 
-# ===================== Helping: campo código y periodo =====================
+# ===================== Ayudas campo código y periodo =====================
 def _find_codigo_field(cols) -> Optional[str]:
     targets = {"CÓDIGO DE DOSÍMETRO","CÓDIGO_DOSÍMETRO","CODIGO DE DOSIMETRO","CODIGO_DOSIMETRO"}
     for c in cols:
@@ -199,14 +206,12 @@ def construir_registros(dfp, dfd, periodo_filtro="— TODOS —"):
             per = str(fila.get("PERIODO DE LECTURA","")).strip().upper()
             if not cod or cod == "NAN": continue
             if pf not in ("","— TODOS —") and per != pf and not per.startswith("CONTROL"): continue
-
             row = dfd.loc[dfd["dosimeter"].astype(str).str.upper() == cod]
             if row.empty: continue
             r0 = row.iloc[0]
             fecha = r0.get("timestamp", pd.NaT)
             try: fecha_str = pd.to_datetime(fecha).strftime("%d/%m/%Y %H:%M") if pd.notna(fecha) else ""
             except Exception: fecha_str = ""
-
             nombre_raw = f"{str(fila.get('NOMBRE','')).strip()} {str(fila.get('APELLIDO','')).strip()}".strip()
             registros.append({
                 "PERIODO DE LECTURA": per or "CONTROL",
@@ -321,7 +326,7 @@ def fit_logo(ws, logo_bytes: bytes, top_left: str = "C1", bottom_right: str = "F
     br_col, br_row = parse_cell(bottom_right)
     if br_col < tl_col: tl_col, br_col = br_col, tl_col
     if br_row < tl_row: tl_row, br_row = br_row, tl_row
-    box_w = sum(ws.column_dimensions[get_column_letter(c)].width or 8.43 for c in range(tl_col, br_col + 1))
+    box_w = sum((ws.column_dimensions[get_column_letter(c)].width or 8.43) for c in range(tl_col, br_col + 1))
     box_w = int(box_w * 7 + 5) - 2 * padding
     box_h = (br_row - tl_row + 1) * 20 * 96 // 72 - 2 * padding
     try: scale = min(box_w / float(img.width), box_h / float(img.height), 1.0)
@@ -368,7 +373,7 @@ def build_formatted_excel(df_final: pd.DataFrame, header_lines: List[str], logo_
     start_row = header_row + 1
     for _, r in df_final[headers].iterrows(): ws.append(list(r.values))
     last_row = ws.max_row
-    for row in ws.iter_rows(min_row=header_row, max_row=last_row, min_col=1, max_col=len(headers)):
+    for row in ws.iter_rows(min_row=header_row, max_row=last_row, min_col=1, max_col=16):
         for cell in row:
             cell.border = border
             if cell.row >= start_row:
@@ -440,6 +445,19 @@ with tab1:
         subir_pm_como_texto = st.checkbox("Subir 'PM' como TEXTO (si Hp en Ninox es Texto)", value=True, key="tab1_pm_texto")
         debug_uno = st.checkbox("Enviar 1 registro (debug)", value=False, key="tab1_debug")
 
+    # --- Catálogo de tablas (opcional) ---
+    with st.expander("📚 Catálogo de tablas Ninox (opcional)"):
+        try:
+            tablas = ninox_list_tables(TEAM_ID, DATABASE_ID)
+            opciones = {f"{t.get('name','(sin nombre)')}  ·  id={t.get('id')}": t.get('id') for t in tablas}
+            if opciones:
+                seleccion = st.selectbox("Elegir tabla base", list(opciones.keys()))
+                if seleccion:
+                    st.session_state["tab1_base"] = opciones[seleccion]
+                    st.info(f"ID seleccionado: **{opciones[seleccion]}** (se aplica al volver a ejecutar)")
+        except Exception as e:
+            st.warning(f"No se pudo listar tablas: {e}")
+
     st.markdown("#### Conexión a Ninox (LISTA DE CÓDIGO)")
     col_a, col_b = st.columns([1,1])
     with col_a: do_connect = st.button("🔌 Conectar a Ninox ahora", use_container_width=True, key="tab1_connect")
@@ -448,16 +466,34 @@ with tab1:
     if do_connect:
         with st.spinner("Conectando a Ninox…"):
             try:
-                df_participantes = ninox_fetch_records_lazy(base_table_id, timeout_s=int(short_timeout))
+                df_participantes = ninox_fetch_records_lazy(st.session_state.get("tab1_base", base_table_id), timeout_s=int(short_timeout))
                 st.session_state.df_participantes = df_participantes
-                if df_participantes.empty: st.warning("Conectado, pero LISTA DE CÓDIGO no tiene filas.")
+
+                if df_participantes.empty:
+                    st.warning("Conectado, pero la tabla LISTA DE CÓDIGO está vacía.")
                 else:
-                    st.success(f"Conectado a Ninox. Filas: {len(df_participantes)}")
-                    st.dataframe(df_participantes.head(15), use_container_width=True)
+                    # ✅ Confirmación + vista previa
+                    n_rows, n_cols = df_participantes.shape
+                    st.success(f"✅ Conectado a Ninox · Tabla: {st.session_state.get('tab1_base', base_table_id)} · Filas: {n_rows} · Columnas: {n_cols}")
+                    prev_rows = st.slider("Filas a mostrar (previa)", min_value=1, max_value=min(200, n_rows), value=min(20, n_rows))
+                    st.dataframe(df_participantes.head(prev_rows), use_container_width=True)
+
+                    # Descargar previa
+                    st.download_button(
+                        "⬇️ Descargar previa CSV",
+                        data=df_participantes.head(prev_rows).to_csv(index=False).encode("utf-8-sig"),
+                        file_name=f"ninox_prev_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        key="dl_prev_csv"
+                    )
+
+                    with st.expander("Ver nombres de columnas (esquema detectado)"):
+                        st.write(list(df_participantes.columns))
+
             except requests.Timeout:
-                st.error("⏱️ Ninox tardó demasiado en responder. Sube el archivo de dosis y procesa; puedes reconectar más tarde.")
+                st.error("⏱️ Ninox tardó demasiado en responder. Sube el archivo de dosis y vuelve a intentar conectarte más tarde.")
             except Exception as e:
-                st.error(f"❌ Error leyendo LISTA DE CÓDIGO: {e}")
+                st.error(f"❌ Error conectando a Ninox: {e}")
 
     st.markdown("#### Archivo de Dosis")
     upload = st.file_uploader("Selecciona CSV/XLS/XLSX", type=["csv","xls","xlsx"], key="tab1_upl")
