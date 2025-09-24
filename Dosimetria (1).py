@@ -1,17 +1,13 @@
 # -*- coding: utf-8 -*-
-import io
-import re
+import io, re
+from io import BytesIO
+from datetime import datetime
+from typing import List, Dict, Any, Optional, Set
+
 import requests
 import pandas as pd
 import streamlit as st
-from datetime import datetime
-from io import BytesIO
 from dateutil.parser import parse as dtparse
-from typing import List, Dict, Any, Optional, Set, Tuple
-
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-from openpyxl.utils import get_column_letter
 
 # ===================== NINOX CONFIG =====================
 API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"
@@ -19,85 +15,85 @@ TEAM_ID     = "YrsYfTegptdZcHJEj"
 DATABASE_ID = "ow1geqnkz00e"
 BASE_URL    = "https://api.ninox.com/v1"
 
-# Tablas: lee de LISTA DE CODIGO, sube y reporta a BASE DE DATOS
-DEFAULT_BASE_TABLE_HINT   = "LISTA DE CODIGO"   # lectura: personas/códigos
-DEFAULT_REPORT_TABLE_HINT = "BASE DE DATOS"     # escritura y reportes
+# Tablas
+DEFAULT_SOURCE_TABLE  = "LISTA DE CODIGO"   # lectura
+DEFAULT_TARGET_TABLE  = "BASE DE DATOS"     # escritura
 
-# ===================== STREAMLIT (global) =====================
+# ===================== STREAMLIT =====================
 st.set_page_config(page_title="Microsievert - Dosimetría", page_icon="🧪", layout="wide")
-st.title("🧪 Sistema de Gestión de Dosimetría — Microsievert")
-st.caption("Ninox + VALOR−CONTROL + Reporte Actual/Anual/Vida + Exportación")
+st.title("🧪 Microsievert — Gestión de Dosimetría (Ninox)")
+st.caption("Lee TODO Ninox, filtra por periodo(s), cruza con dosis, VALOR−CONTROL, y sube a BASE DE DATOS.")
 
-if "df_final" not in st.session_state:
-    st.session_state.df_final = None
+# -------- util cache bust --------
+col_top1, col_top2 = st.columns([1,1])
+with col_top1:
+    if st.button("🔄 Refrescar (limpiar caché y volver a leer Ninox)"):
+        st.cache_data.clear()
+        st.experimental_rerun()
+with col_top2:
+    st.write("")
 
 # ===================== Ninox helpers =====================
-def ninox_headers() -> Dict[str, str]:
+def ninox_headers():
     return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
 @st.cache_data(ttl=300, show_spinner=False)
-def ninox_list_tables(team_id: str, db_id: str) -> list:
+def ninox_list_tables(team_id: str, db_id: str):
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
     r = requests.get(url, headers=ninox_headers(), timeout=30)
     r.raise_for_status()
     return r.json()
 
-def ninox_resolve_table_id(team_id: str, db_id: str, table_hint: str) -> str:
-    """Acepta ID (p.ej. 'I') o NOMBRE ('LISTA DE CODIGO') y devuelve el ID real."""
-    hint = (table_hint or "").strip()
-    if hint and " " not in hint and len(hint) <= 8:  # parece ID
+def resolve_table_id(team_id: str, db_id: str, hint: str) -> str:
+    hint = (hint or "").strip()
+    if hint and " " not in hint and len(hint) <= 8:
         return hint
     for t in ninox_list_tables(team_id, db_id):
-        name = str(t.get("name", "")).strip().lower()
-        tid  = str(t.get("id", "")).strip()
-        if name == hint.lower() or tid == hint:
-            return tid
-    return hint  # deja que la API falle claramente
+        if str(t.get("name","")).strip().lower() == hint.lower():
+            return str(t.get("id"))
+    return hint  # deja que la API dé error si no existe
 
 @st.cache_data(ttl=300, show_spinner=False)
-def ninox_fetch_records(team_id: str, db_id: str, table_hint: str, page_size: int = 1000) -> pd.DataFrame:
-    """Lee todos los registros (sin límite) y devuelve DataFrame con 'fields'."""
-    table_id = ninox_resolve_table_id(team_id, db_id, table_hint)
-    base = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
-    out = []
-    # Ruta principal: limit/skip
-    try:
-        skip = 0
-        while True:
-            r = requests.get(base, headers=ninox_headers(), params={"limit": page_size, "skip": skip}, timeout=60)
-            if r.status_code == 404:
-                raise FileNotFoundError(f"Tabla '{table_hint}' (ID resuelto '{table_id}') no existe en Ninox.")
-            r.raise_for_status()
-            chunk = r.json()
-            if not chunk: break
-            out.extend(chunk)
-            if len(chunk) < page_size: break
-            skip += page_size
-    except FileNotFoundError:
-        raise
-    except Exception:
-        # Fallback: perPage/offset (APIs antiguas)
-        offset = 0
-        while True:
-            r = requests.get(base, headers=ninox_headers(), params={"perPage": page_size, "offset": offset}, timeout=60)
-            if r.status_code == 404:
-                raise FileNotFoundError(f"Tabla '{table_hint}' (ID resuelto '{table_id}') no existe en Ninox.")
-            r.raise_for_status()
-            batch = r.json()
-            if not batch: break
-            out.extend(batch)
-            if len(batch) < page_size: break
-            offset += page_size
-    rows = [x.get("fields", {}) for x in out]
-    df = pd.DataFrame(rows) if rows else pd.DataFrame()
-    df.columns = [str(c) for c in df.columns]
-    return df
-
-def ninox_insert_records(team_id: str, db_id: str, table_hint: str, rows: list, batch_size: int = 400) -> dict:
-    table_id = ninox_resolve_table_id(team_id, db_id, table_hint)
+def ninox_fetch_all(team_id: str, db_id: str, table_hint: str, page_size: int = 1000) -> list:
+    """Lee TODOS los registros de una tabla Ninox (limit/skip)"""
+    table_id = resolve_table_id(team_id, db_id, table_hint)
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
-    if not rows:
-        return {"ok": True, "inserted": 0}
+    out, skip = [], 0
+    while True:
+        r = requests.get(url, headers=ninox_headers(), params={"limit": page_size, "skip": skip}, timeout=60)
+        if r.status_code == 404:
+            raise FileNotFoundError(f"Tabla '{table_hint}' (ID '{table_id}') no existe.")
+        r.raise_for_status()
+        chunk = r.json()
+        if not chunk:
+            break
+        out.extend(chunk)
+        if len(chunk) < page_size:
+            break
+        skip += page_size
+    return out
+
+def ninox_fetch_records_df(team_id: str, db_id: str, table_hint: str) -> pd.DataFrame:
+    recs = ninox_fetch_all(team_id, db_id, table_hint)
+    rows = [x.get("fields", {}) for x in recs]
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+@st.cache_data(ttl=120, show_spinner=False)
+def ninox_get_fieldnames(team_id: str, db_id: str, table_hint: str) -> set:
+    table_id = resolve_table_id(team_id, db_id, table_hint)
+    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
+    r = requests.get(url, headers=ninox_headers(), timeout=30)
+    r.raise_for_status()
+    info = r.json()
+    for t in info:
+        if str(t.get("id")) == str(table_id):
+            cols = t.get("fields") or t.get("columns") or []
+            return {c.get("name") for c in cols if isinstance(c, dict) and c.get("name")}
+    return set()
+
+def ninox_insert_rows(team_id: str, db_id: str, table_hint: str, rows: list, batch_size: int = 400):
+    table_id = resolve_table_id(team_id, db_id, table_hint)
+    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
     inserted = 0
     for i in range(0, len(rows), batch_size):
         chunk = rows[i:i+batch_size]
@@ -107,221 +103,201 @@ def ninox_insert_records(team_id: str, db_id: str, table_hint: str, rows: list, 
         inserted += len(chunk)
     return {"ok": True, "inserted": inserted}
 
-@st.cache_data(ttl=120, show_spinner=False)
-def ninox_get_table_fields(team_id: str, db_id: str, table_hint: str) -> set:
-    table_id = ninox_resolve_table_id(team_id, db_id, table_hint)
-    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
-    r = requests.get(url, headers=ninox_headers(), timeout=30)
-    r.raise_for_status()
-    info = r.json()
-    fields = set()
-    for t in info:
-        if str(t.get("id")) == str(table_id):
-            cols = t.get("fields") or t.get("columns") or []
-            for c in cols:
-                name = c.get("name") if isinstance(c, dict) else None
-                if name: fields.add(name)
-            break
-    return fields
-
-# ===================== Utilidades =====================
-def _norm_period(s: str) -> str:
-    """Normaliza textos de periodo: mayúsculas, quita puntos finales, colapsa espacios."""
-    s = (s or "").strip()
-    # reemplaza NBSP y dobles espacios
-    s = s.replace("\u00a0", " ")
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"\.+$", "", s)
-    return s.upper()
-
-def as_value(v: Any):
-    if v is None: return ""
-    s = str(v).strip().replace(",", ".")
-    if s.upper() == "PM": return "PM"
-    try: return float(s)
-    except Exception: return s
-
-def as_num(v: Any) -> float:
-    if v is None: return 0.0
-    s = str(v).strip().replace(",", ".")
-    if s == "" or s.upper() == "PM": return 0.0
-    try: return float(s)
-    except Exception: return 0.0
-
-def pm_or_sum(raws, numeric_sum) -> Any:
-    import pandas as _pd
-    if isinstance(raws, (list, tuple, set)):
-        arr = list(raws)
-    elif isinstance(raws, _pd.Series):
-        arr = raws.tolist()
-    elif raws is None or (isinstance(raws, float) and _pd.isna(raws)) or raws == "":
-        arr = []
-    else:
-        arr = [raws]
-    vals = [str(x).upper() for x in arr if str(x).strip() != ""]
-    if vals and all(v == "PM" for v in vals):
-        return "PM"
-    try:
-        total = float(numeric_sum)
-        if _pd.isna(total): total = 0.0
-    except Exception:
-        total = 0.0
-    return float(f"{total:.2f}")
-
-def merge_raw_lists(*vals):
-    import pandas as _pd
-    out: List[Any] = []
-    for v in vals:
-        if isinstance(v, (list, tuple, set)):
-            out.extend(list(v))
-        elif isinstance(v, _pd.Series):
-            out.extend(v.tolist())
-        elif v is None or (isinstance(v, float) and _pd.isna(v)) or v == "":
-            continue
-        else:
-            out.append(v)
-    return out
-
-# ===================== Excel simple VALOR-CONTROL =====================
-def exportar_excel_simple_valor_control(df_final: pd.DataFrame) -> bytes:
-    wb = Workbook(); ws = wb.active; ws.title = "REPORTE DE DOSIS"
-    border = Border(left=Side(style='thin'), right=Side(style='thin'),
-                    top=Side(style='thin'),  bottom=Side(style='thin'))
-    ws['I1'] = f"Fecha de emisión: {datetime.now().strftime('%d/%m/%Y')}"
-    ws['I1'].font = Font(size=10, italic=True)
-    ws['I1'].alignment = Alignment(horizontal='right', vertical='top')
-    ws.merge_cells('A5:J5')
-    c = ws['A5']; c.value = 'REPORTE DE DOSIMETRÍA'
-    c.font = Font(bold=True, size=14); c.alignment = Alignment(horizontal='center')
-    headers = [
-        'PERIODO DE LECTURA','CLIENTE','CÓDIGO DE DOSÍMETRO','NOMBRE',
-        'CÉDULA','FECHA DE LECTURA','TIPO DE DOSÍMETRO','Hp(10)','Hp(0.07)','Hp(3)'
+# ===================== Normalizadores =====================
+def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
+    """Asegura columnas y normaliza PERIODO y CODIGO."""
+    need = [
+        "CÉDULA","CÓDIGO USUARIO","NOMBRE","APELLIDO","FECHA DE NACIMIENTO",
+        "CLIENTE","CÓDIGO_CLIENTE","ETIQUETA","CÓDIGO_DOSÍMETRO",
+        "PERIODO DE LECTURA","TIPO DE DOSÍMETRO"
     ]
-    for i, h in enumerate(headers, 1):
-        cell = ws.cell(row=7, column=i, value=h)
-        cell.font = Font(bold=True); cell.alignment = Alignment(horizontal='center')
-        cell.fill = PatternFill('solid', fgColor='DDDDDD'); cell.border = border
-    start = 8
-    for ridx, (_, row) in enumerate(df_final.iterrows()):
-        for cidx, h in enumerate(headers, 1):
-            val = row.get(h, "")
-            cell = ws.cell(row=start + ridx, column=cidx, value=val)
-            cell.alignment = Alignment(horizontal='center', wrap_text=True)
-            cell.font = Font(size=10); cell.border = border
-    for col in ws.columns:
-        mx = max(len(str(c.value)) if c.value else 0 for c in col) + 2
-        ws.column_dimensions[get_column_letter(col[0].column)].width = mx
-    bio = io.BytesIO(); wb.save(bio); bio.seek(0)
-    return bio.read()
+    for c in need:
+        if c not in df.columns:
+            df[c] = ""
 
-# ===================== Lectura de dosis (archivo) =====================
+    ap = df["APELLIDO"].fillna("").astype(str).str.strip()
+    df["NOMBRE_COMPLETO"] = (df["NOMBRE"].fillna("").astype(str).str.strip() + " " + ap).str.strip()
+    df["CODIGO"] = df["CÓDIGO_DOSÍMETRO"].fillna("").astype(str).str.strip().str.upper()
+
+    df["PERIODO_NORM"] = (
+        df["PERIODO DE LECTURA"].fillna("").astype(str).str.strip().str.upper()
+        .str.replace(r"\s+", " ", regex=True)
+        .str.replace(r"\.+$", "", regex=True)
+    )
+
+    def is_control_row(r):
+        for k in ["ETIQUETA","NOMBRE","CÉDULA","CÓDIGO USUARIO"]:
+            if str(r.get(k,"")).strip().upper() == "CONTROL":
+                return True
+        return False
+
+    df["CONTROL_FLAG"] = df.apply(is_control_row, axis=1)
+    for c in ["CLIENTE","TIPO DE DOSÍMETRO","CÉDULA"]:
+        df[c] = df[c].fillna("").astype(str).str.strip()
+
+    return df
+
 def leer_dosis(upload) -> Optional[pd.DataFrame]:
-    if not upload: return None
+    if not upload:
+        return None
     name = upload.name.lower()
     if name.endswith(".csv"):
         try:
             df = pd.read_csv(upload, delimiter=';', engine='python')
         except Exception:
-            upload.seek(0); df = pd.read_csv(upload)
+            upload.seek(0)
+            df = pd.read_csv(upload)
     else:
         df = pd.read_excel(upload)
+
     norm = (df.columns.astype(str).str.strip().str.lower()
             .str.replace(' ', '', regex=False)
             .str.replace('(', '').str.replace(')', '')
             .str.replace('.', '', regex=False))
     df.columns = norm
+
     if 'dosimeter' not in df.columns:
         for alt in ['dosimetro','codigo','codigodosimetro','codigo_dosimetro']:
             if alt in df.columns:
                 df.rename(columns={alt: 'dosimeter'}, inplace=True); break
+
     for cand in ['hp10dosecorr','hp10dose','hp10']:
         if cand in df.columns: df.rename(columns={cand: 'hp10dose'}, inplace=True); break
-    for cand in ['hp007dosecorr','hp007dose','hp007','hp007dose']:
+    for cand in ['hp007dosecorr','hp007dose','hp007']:
         if cand in df.columns: df.rename(columns={cand: 'hp0.07dose'}, inplace=True); break
     for cand in ['hp3dosecorr','hp3dose','hp3']:
         if cand in df.columns: df.rename(columns={cand: 'hp3dose'}, inplace=True); break
+
     for k in ['hp10dose','hp0.07dose','hp3dose']:
         if k in df.columns: df[k] = pd.to_numeric(df[k], errors='coerce').fillna(0.0)
         else: df[k] = 0.0
-    if 'dosimeter' in df.columns:
-        df['dosimeter'] = df['dosimeter'].astype(str).str.strip().str.upper()
+
     if 'timestamp' in df.columns:
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+
+    if 'dosimeter' in df.columns:
+        df['dosimeter'] = df['dosimeter'].astype(str).str.strip().str.upper()
+
     return df
 
-# ===================== Normalizador LISTA DE CODIGO =====================
-def normalize_lista_codigo(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza columnas de 'LISTA DE CODIGO'."""
-    df = df_raw.copy()
-    needed = [
-        "CÉDULA","CÓDIGO USUARIO","NOMBRE","APELLIDO","FECHA DE NACIMIENTO",
-        "CLIENTE","CÓDIGO_CLIENTE","ETIQUETA","CÓDIGO_DOSÍMETRO",
-        "PERIODO DE LECTURA","TIPO DE DOSÍMETRO"
-    ]
-    for c in needed:
-        if c not in df.columns:
-            df[c] = ""
-    df["NOMBRE"] = df["NOMBRE"].fillna("").astype(str).str.strip()
-    ap = df["APELLIDO"].fillna("").astype(str).str.strip()
-    df["NOMBRE_COMPLETO"] = (df["NOMBRE"] + " " + ap).str.strip().replace({"^$": ""}, regex=True)
-    df["CODIGO"] = df["CÓDIGO_DOSÍMETRO"].fillna("").astype(str).str.strip().str.upper()
-    df["CLIENTE"] = df["CLIENTE"].fillna("").astype(str).str.strip()
-    df["PERIODO_NORM"] = df["PERIODO DE LECTURA"].map(_norm_period)
-    def is_control_row(r):
-        for k in ["ETIQUETA","NOMBRE","CÉDULA","CÓDIGO USUARIO"]:
-            v = str(r.get(k, "")).strip().upper()
-            if v == "CONTROL":
-                return True
-        return False
-    df["CONTROL_FLAG"] = df.apply(is_control_row, axis=1)
-    df["TIPO DE DOSÍMETRO"] = df["TIPO DE DOSÍMETRO"].fillna("").astype(str).str.strip()
-    df["CÉDULA"] = df["CÉDULA"].fillna("").astype(str).str.strip()
-    return df
+def periodo_desde_fecha(periodo_str: str, fecha_str: str) -> str:
+    per = (periodo_str or "").strip().upper()
+    per = re.sub(r'\.+$', '', per).strip()
+    if per and per != "CONTROL": return per
+    if not fecha_str: return per or ""
+    try:
+        fecha = pd.to_datetime(fecha_str, dayfirst=True, errors="coerce")
+        if pd.isna(fecha): return per or ""
+        meses = ["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO","JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"]
+        return f"{meses[fecha.month-1]} {fecha.year}"
+    except Exception:
+        return per or ""
 
-# ===================== Construcción de registros =====================
-def construir_registros_desde_lista_codigo(
-    df_lista: pd.DataFrame,
-    df_dosis: pd.DataFrame,
-    periodos_filtro: Optional[List[str]] = None,
-    debug_matches: bool = False
-) -> Tuple[List[Dict[str, Any]], dict]:
+def aplicar_valor_menos_control(registros: List[Dict[str,Any]]):
+    if not registros: return registros
+    base10 = float(registros[0]['Hp(10)'])
+    base07 = float(registros[0]['Hp(0.07)'])
+    base3  = float(registros[0]['Hp(3)'])
+    for i, r in enumerate(registros):
+        r['PERIODO DE LECTURA'] = periodo_desde_fecha(r.get('PERIODO DE LECTURA',''), r.get('FECHA DE LECTURA',''))
+        if i == 0:
+            r['NOMBRE'] = "CONTROL"
+            r['Hp(10)'] = f"{base10:.2f}"
+            r['Hp(0.07)'] = f"{base07:.2f}"
+            r['Hp(3)'] = f"{base3:.2f}"
+        else:
+            for key, base in [('Hp(10)', base10), ('Hp(0.07)', base07), ('Hp(3)', base3)]:
+                diff = float(r[key]) - base
+                r[key] = "PM" if diff < 0.005 else f"{diff:.2f}"
+    return registros
 
-    # Filtrado por uno o varios periodos (ya normalizados)
-    if periodos_filtro:
-        per_set = {_norm_period(p) for p in periodos_filtro if p}
-        base = df_lista[df_lista["PERIODO_NORM"].isin(per_set)].copy()
-    else:
-        base = df_lista.copy()
+# ===================== UI: configuración =====================
+with st.sidebar:
+    st.markdown("### ⚙️ Configuración (TAB 1)")
+    source_table  = st.text_input("Tabla de lectura (personas/códigos)", value=DEFAULT_SOURCE_TABLE)
+    target_table  = st.text_input("Tabla de escritura (salida)", value=DEFAULT_TARGET_TABLE)
+    subir_pm_texto = st.checkbox("Subir 'PM' como TEXTO (si Hp son texto en Ninox)", value=True)
+    debug_one      = st.checkbox("Enviar 1 registro (debug)", value=False)
+    show_tables    = st.checkbox("Mostrar tablas Ninox (debug)", value=False)
 
-    df_d = df_dosis.copy()
-    df_d["dosimeter"] = df_d["dosimeter"].astype(str).str.strip().str.upper()
-    # Índice por código de dosímetro para match rápido
-    idx = df_d.set_index("dosimeter")
+# ===================== Leer TODO Ninox (LISTA DE CODIGO) =====================
+try:
+    df_lista_raw = ninox_fetch_records_df(TEAM_ID, DATABASE_ID, source_table)
+    if show_tables:
+        st.expander("Tablas Ninox (debug)").json(ninox_list_tables(TEAM_ID, DATABASE_ID))
+    if df_lista_raw.empty:
+        st.error("No hay filas en LISTA DE CODIGO.")
+        st.stop()
+    df_lista = normalize_lista_codigo(df_lista_raw)
 
+    st.success(f"Conectado a Ninox. Tabla: {source_table} — Filas: {len(df_lista)}")
+    st.dataframe(df_lista.head(25), use_container_width=True)
+except Exception as e:
+    st.error(f"Error leyendo '{source_table}': {e}")
+    st.stop()
+
+# ===================== Selector de periodos (multi) =====================
+periodos = sorted([p for p in df_lista["PERIODO_NORM"].dropna().astype(str).unique() if p.strip() != ""],
+                  key=lambda s: (int(re.search(r"(19|20)\d{2}", s).group(0)) if re.search(r"(19|20)\d{2}", s) else 0,
+                                 "ENERO FEBRERO MARZO ABRIL MAYO JUNIO JULIO AGOSTO SEPTIEMBRE OCTUBRE NOVIEMBRE DICIEMBRE".split().index(s.split()[0]) if s.split() else -1),
+                  reverse=True)
+st.markdown("#### Filtrar por PERIODO DE LECTURA (elige uno o varios, **vacío = TODOS**)")
+periodos_sel = st.multiselect("PERIODO DE LECTURA", options=periodos, default=[])
+
+# Aplica filtro (vacío = todos)
+if periodos_sel:
+    df_lista_f = df_lista[df_lista["PERIODO_NORM"].isin(periodos_sel)].copy()
+else:
+    df_lista_f = df_lista.copy()
+
+# Muestra conteos por periodo para confirmar que lee TODO
+with st.expander("Resumen de periodos detectados"):
+    st.write(df_lista.groupby("PERIODO_NORM").size().sort_values(ascending=False))
+
+# ===================== Archivo de Dosis =====================
+st.markdown("### Archivo de Dosis")
+upl = st.file_uploader("Selecciona CSV/XLS/XLSX", type=["csv","xls","xlsx"])
+df_dosis = leer_dosis(upl) if upl else None
+if df_dosis is not None:
+    st.caption(f"Vista previa dosis (normalizada) — filas: {len(df_dosis)}")
+    st.dataframe(df_dosis.head(20), use_container_width=True)
+
+# ===================== Procesar =====================
+colL, colR = st.columns([1,1])
+with colL:
+    nombre_out = st.text_input("Nombre archivo (sin extensión)", value=f"ReporteDosimetria_{datetime.now().strftime('%Y-%m-%d')}")
+with colR:
+    btn_proc = st.button("✅ Procesar", type="primary", use_container_width=True)
+
+def construir_registros(df_lista_use: pd.DataFrame, df_dosis_use: pd.DataFrame) -> List[Dict[str,Any]]:
+    if df_lista_use.empty or df_dosis_use is None or df_dosis_use.empty:
+        return []
+
+    idx = df_dosis_use.set_index("dosimeter")
     registros = []
-    base = pd.concat([base[base["CONTROL_FLAG"]], base[~base["CONTROL_FLAG"]]], ignore_index=True)
 
-    matched_codes, unmatched_codes = set(), set()
+    # Control primero
+    base = pd.concat([df_lista_use[df_lista_use["CONTROL_FLAG"]], df_lista_use[~df_lista_use["CONTROL_FLAG"]]],
+                     ignore_index=True)
 
+    miss = []
     for _, r in base.iterrows():
         cod = r["CODIGO"]
         if not cod or cod.lower() == "nan":
             continue
         if cod not in idx.index:
-            unmatched_codes.add(cod); continue
+            miss.append(cod)
+            continue
 
         d = idx.loc[cod]
-        if isinstance(d, pd.DataFrame):  # si hay varias filas, toma la última por timestamp
-            if "timestamp" in d.columns:
-                d = d.sort_values(by="timestamp").iloc[-1]
-            else:
-                d = d.iloc[-1]
+        if isinstance(d, pd.DataFrame):
+            d = d.sort_values(by="timestamp").iloc[-1]
 
         ts = d.get("timestamp", pd.NaT)
+        fecha_str = ""
         try:
-            fecha_str = pd.to_datetime(ts).strftime("%d/%m/%Y %H:%M") if pd.notna(ts) else ""
-        except Exception:
-            fecha_str = ""
+            if pd.notna(ts): fecha_str = pd.to_datetime(ts).strftime("%d/%m/%Y %H:%M")
+        except Exception: pass
 
         registros.append({
             "PERIODO DE LECTURA": r["PERIODO_NORM"] or "",
@@ -334,530 +310,136 @@ def construir_registros_desde_lista_codigo(
             "Hp(10)": float(d.get("hp10dose", 0.0) or 0.0),
             "Hp(0.07)": float(d.get("hp0.07dose", 0.0) or 0.0),
             "Hp(3)": float(d.get("hp3dose", 0.0) or 0.0),
-            "_IS_CONTROL": bool(r["CONTROL_FLAG"]),
         })
-        matched_codes.add(cod)
 
-    # Ordena: control primero
-    registros.sort(key=lambda x: (not x.get("_IS_CONTROL", False), x.get("NOMBRE","")))
-    for r in registros:
-        r.pop("_IS_CONTROL", None)
+    # Debug de no encontrados
+    if st.checkbox("📎 Mostrar debug de códigos"):
+        st.write("Códigos en dosis no encontrados en LISTA DE CODIGO filtrada:", sorted(set(idx.index) - set(base["CODIGO"])))
+        st.write("Códigos en LISTA DE CODIGO filtrada sin dosis:", sorted(set(miss)))
 
-    debug = {"matched": sorted(matched_codes), "unmatched": sorted(unmatched_codes)}
-    return registros, debug
-
-# ===================== Valor - Control =====================
-def periodo_desde_fecha(periodo_str: str, fecha_str: str) -> str:
-    per = _norm_period(periodo_str)
-    if per and per != "CONTROL": return per
-    if not fecha_str: return per or ""
-    try:
-        fecha = pd.to_datetime(fecha_str, dayfirst=True, errors="coerce")
-        if pd.isna(fecha): return per or ""
-        meses = ["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO",
-                 "JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"]
-        return f"{meses[fecha.month - 1]} {fecha.year}"
-    except Exception:
-        return per or ""
-
-def aplicar_valor_menos_control(registros: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not registros: return registros
-    base10 = float(registros[0]['Hp(10)'])
-    base07 = float(registros[0]['Hp(0.07)'])
-    base3  = float(registros[0]['Hp(3)'])
-    for i, r in enumerate(registros):
-        r['PERIODO DE LECTURA'] = periodo_desde_fecha(r.get('PERIODO DE LECTURA', ''), r.get('FECHA DE LECTURA', ''))
-        if i == 0:
-            r['NOMBRE']   = "CONTROL"
-            r['Hp(10)']   = f"{base10:.2f}"
-            r['Hp(0.07)'] = f"{base07:.2f}"
-            r['Hp(3)']    = f"{base3:.2f}"
-        else:
-            for key, base in [('Hp(10)', base10), ('Hp(0.07)', base07), ('Hp(3)', base3)]:
-                diff = float(r[key]) - base
-                r[key] = "PM" if diff < 0.005 else f"{diff:.2f}"
+    # Orden: control primero
+    registros.sort(key=lambda x: (x.get("NOMBRE","").strip().upper() != "CONTROL", x.get("NOMBRE","")))
     return registros
 
-# ===================== TABS =====================
-tab1, tab2 = st.tabs(["📥 Carga, VALOR−CONTROL y Subida", "📊 Reporte Actual / Anual / Vida"])
-
-# ===================== TAB 1 =====================
-with tab1:
-    st.subheader("📤 Cargar archivo de Dosis ↔ LISTA DE CODIGO (Ninox) → subir a BASE DE DATOS")
-
-    with st.sidebar:
-        st.markdown("### ⚙️ Configuración (TAB 1)")
-        base_table_hint   = st.text_input("Tabla de lectura (personas/códigos)", value=DEFAULT_BASE_TABLE_HINT, key="tab1_base")
-        report_table_hint = st.text_input("Tabla de escritura (salida)", value=DEFAULT_REPORT_TABLE_HINT, key="tab1_report")
-        subir_pm_como_texto = st.checkbox("Subir 'PM' como TEXTO (si Hp son texto en Ninox)", value=True, key="tab1_pm_texto")
-        debug_uno = st.checkbox("Enviar 1 registro (debug)", value=False, key="tab1_debug")
-        show_tables = st.checkbox("Mostrar tablas Ninox (debug)", value=False, key="tab1_show")
-        show_code_debug = st.checkbox("Mostrar debug de códigos", value=False, key="tab1_codes_dbg")
-
-    # Leer LISTA DE CODIGO
-    try:
-        if show_tables:
-            st.expander("Tablas Ninox (debug)").json(ninox_list_tables(TEAM_ID, DATABASE_ID))
-        df_lista_raw = ninox_fetch_records(TEAM_ID, DATABASE_ID, base_table_hint)
-        if df_lista_raw.empty:
-            st.warning("No hay datos en LISTA DE CODIGO.")
-            df_participantes = None
-        else:
-            df_participantes = normalize_lista_codigo(df_lista_raw)
-            st.success(f"Conectado a Ninox. Tabla: {base_table_hint}")
-            st.dataframe(df_participantes[["PERIODO_NORM","NOMBRE_COMPLETO","CODIGO","CLIENTE","CONTROL_FLAG"]].head(20),
-                         use_container_width=True)
-    except Exception as e:
-        st.error(f"Error leyendo {base_table_hint}: {e}")
-        df_participantes = None
-
-    # --- NUEVO: multiselect de periodos detectados en Ninox ---
-    if df_participantes is not None and not df_participantes.empty:
-        periodos_disponibles = sorted(df_participantes["PERIODO_NORM"].dropna().unique().tolist())
+if btn_proc:
+    if df_lista_f.empty:
+        st.error("No hay filas en LISTA DE CODIGO (tras aplicar filtro de periodo).")
+    elif df_dosis is None or df_dosis.empty:
+        st.error("No hay datos de dosis.")
+    elif 'dosimeter' not in df_dosis.columns:
+        st.error("El archivo de dosis debe tener la columna 'dosimeter'.")
     else:
-        periodos_disponibles = []
+        with st.spinner("Procesando…"):
+            registros = construir_registros(df_lista_f, df_dosis)
+            if not registros:
+                st.warning("No hay coincidencias CÓDIGO_DOSÍMETRO ↔ dosimeter (revisa periodos/códigos).")
+            else:
+                registros = aplicar_valor_menos_control(registros)
+                df_final = pd.DataFrame(registros)
 
-    periodos_filtro = st.multiselect(
-        "Filtrar por PERIODO DE LECTURA (elige uno o varios; vacío = TODOS)",
-        options=periodos_disponibles,
-        default=[],
-        key="tab1_per_multi"
-    )
-
-    st.markdown("#### Archivo de Dosis")
-    upload = st.file_uploader("Selecciona CSV/XLS/XLSX", type=["csv","xls","xlsx"], key="tab1_upl")
-    df_dosis = leer_dosis(upload) if upload else None
-    if df_dosis is not None:
-        st.caption("Vista previa dosis (normalizada):")
-        st.dataframe(df_dosis.head(15), use_container_width=True)
-
-    col1, col2 = st.columns([1,1])
-    with col1:
-        nombre_reporte = st.text_input("Nombre archivo (sin extensión)",
-                                       value=f"ReporteDosimetria_{datetime.now().strftime('%Y-%m-%d')}",
-                                       key="tab1_name")
-    with col2:
-        btn_proc = st.button("✅ Procesar", type="primary", use_container_width=True, key="tab1_btn_proc")
-
-    if btn_proc:
-        if df_participantes is None or df_participantes.empty:
-            st.error("No hay filas en LISTA DE CODIGO.")
-        elif df_dosis is None or df_dosis.empty:
-            st.error("No hay datos de dosis.")
-        elif 'dosimeter' not in df_dosis.columns:
-            st.error("El archivo de dosis debe tener la columna 'dosimeter'.")
-        else:
-            with st.spinner("Procesando..."):
-                registros, dbg = construir_registros_desde_lista_codigo(
-                    df_participantes, df_dosis, periodos_filtro=periodos_filtro, debug_matches=show_code_debug
+                # Limpiezas de texto
+                df_final['PERIODO DE LECTURA'] = (
+                    df_final['PERIODO DE LECTURA'].astype(str).str.replace(r'\.+$', '', regex=True).str.strip()
                 )
-                if show_code_debug:
-                    with st.expander("Debug de coincidencias"):
-                        st.write("Con match:", dbg.get("matched"))
-                        st.write("Sin match:", dbg.get("unmatched"))
+                if not df_final.empty:
+                    df_final.loc[df_final.index.min(), 'NOMBRE'] = 'CONTROL'
+                    df_final['NOMBRE'] = df_final['NOMBRE'].astype(str).str.replace(r'\.+$', '', regex=True).str.strip()
 
-                if not registros:
-                    st.warning("No hay coincidencias CÓDIGO_DOSÍMETRO ↔ dosimeter (revisa filtro/códigos).")
-                else:
-                    registros = aplicar_valor_menos_control(registros)
-                    df_final = pd.DataFrame(registros)
-                    # Limpieza
-                    df_final['PERIODO DE LECTURA'] = df_final['PERIODO DE LECTURA'].astype(str)
-                    if not df_final.empty:
-                        df_final.loc[df_final.index.min(), 'NOMBRE'] = 'CONTROL'
-                        df_final['NOMBRE'] = df_final['NOMBRE'].astype(str).str.strip()
-                    st.session_state.df_final = df_final
-                    st.success(f"¡Listo! Registros generados: {len(df_final)}")
-                    st.dataframe(df_final, use_container_width=True)
+                st.success(f"¡Listo! Registros generados: {len(df_final)}")
+                st.dataframe(df_final, use_container_width=True)
 
-                    try:
-                        xlsx = exportar_excel_simple_valor_control(df_final)
-                        st.download_button(
-                            "⬇️ Descargar Excel (VALOR−CONTROL)",
-                            data=xlsx,
-                            file_name=f"{(nombre_reporte.strip() or 'ReporteDosimetria')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="tab1_dl"
-                        )
-                    except Exception as e:
-                        st.error(f"No se pudo generar Excel: {e}")
+                # Excel simple (opcional)
+                def to_excel_simple(df: pd.DataFrame):
+                    bio = BytesIO()
+                    with pd.ExcelWriter(bio, engine="openpyxl") as w:
+                        df.to_excel(w, index=False, sheet_name="REPORTE")
+                    bio.seek(0)
+                    return bio.getvalue()
 
-    st.markdown("---")
-    st.subheader("⬆️ Subir TODO a Ninox (tabla BASE DE DATOS)")
+                xlsx = to_excel_simple(df_final)
+                st.download_button("⬇️ Descargar Excel (VALOR−CONTROL)",
+                                   data=xlsx,
+                                   file_name=f"{(nombre_out.strip() or 'ReporteDosimetria')}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    CUSTOM_MAP = {
-        "PERIODO DE LECTURA": "PERIODO DE LECTURA",
-        "CLIENTE": "CLIENTE",
-        "CÓDIGO DE DOSÍMETRO": "CÓDIGO_DOSÍMETRO",  # importante: con guion bajo en Ninox
-        "NOMBRE": "NOMBRE",
-        "CÉDULA": "CÉDULA",
-        "FECHA DE LECTURA": "FECHA DE LECTURA",
-        "TIPO DE DOSÍMETRO": "TIPO DE DOSÍMETRO",
-    }
-    SPECIAL_MAP = {"Hp(10)": "Hp (10)", "Hp(0.07)": "Hp (0.07)", "Hp(3)": "Hp (3)"}
+                # Guardar en sesión para subir
+                st.session_state["df_final"] = df_final
 
-    def resolve_dest_name(col_name: str) -> str:
-        if col_name in SPECIAL_MAP: return SPECIAL_MAP[col_name]
-        if col_name in CUSTOM_MAP:  return CUSTOM_MAP[col_name]
-        return col_name
+st.markdown("---")
+st.subheader("⬆️ Subir a Ninox (BASE DE DATOS)")
 
-    def _hp_value(v, as_text_pm=True):
-        if isinstance(v, str) and v.strip().upper() == "PM":
-            return "PM" if as_text_pm else None
+CUSTOM_MAP = {
+    "PERIODO DE LECTURA": "PERIODO DE LECTURA",
+    "CLIENTE": "CLIENTE",
+    "CÓDIGO DE DOSÍMETRO": "CÓDIGO_DOSÍMETRO",   # <- campo con guion bajo
+    "NOMBRE": "NOMBRE",
+    "CÉDULA": "CÉDULA",
+    "FECHA DE LECTURA": "FECHA DE LECTURA",
+    "TIPO DE DOSÍMETRO": "TIPO DE DOSÍMETRO",
+}
+SPECIAL_MAP = {"Hp(10)": "Hp (10)", "Hp(0.07)": "Hp (0.07)", "Hp(3)": "Hp (3)"}
+
+def resolve_dest(col: str) -> str:
+    if col in SPECIAL_MAP: return SPECIAL_MAP[col]
+    if col in CUSTOM_MAP:  return CUSTOM_MAP[col]
+    return col
+
+def _hp_out(v, as_text_pm=True):
+    if isinstance(v, str) and v.strip().upper() == "PM":
+        return "PM" if as_text_pm else None
+    try:
+        return float(v)
+    except Exception:
+        return v if v is not None else None
+
+def _as_str(v):
+    if pd.isna(v): return ""
+    if isinstance(v, (pd.Timestamp,)):
+        return v.strftime("%Y-%m-%d %H:%M:%S")
+    return str(v)
+
+if st.button("Subir TODO a Ninox (tabla BASE DE DATOS)"):
+    df_final = st.session_state.get("df_final")
+    if df_final is None or df_final.empty:
+        st.error("Primero pulsa **Procesar**.")
+    else:
         try:
-            return float(v)
-        except Exception:
-            return v if v is not None else None
+            fields_in_target = ninox_get_fieldnames(TEAM_ID, DATABASE_ID, target_table)
+        except Exception as e:
+            st.error(f"No pude leer campos de '{target_table}': {e}")
+            fields_in_target = set()
 
-    def _to_str(v):
-        if pd.isna(v): return ""
-        if isinstance(v, (pd.Timestamp, )):
-            return v.strftime("%Y-%m-%d %H:%M:%S")
-        return str(v)
+        with st.expander("Campos detectados en destino"):
+            st.write(sorted(fields_in_target))
 
-    if st.button("Subir TODO a Ninox (tabla BASE DE DATOS)", key="tab1_btn_upload"):
-        df_final = st.session_state.df_final
-        if df_final is None or df_final.empty:
-            st.error("Primero pulsa 'Procesar'.")
-        else:
-            try:
-                ninox_fields = ninox_get_table_fields(TEAM_ID, DATABASE_ID, DEFAULT_REPORT_TABLE_HINT)
-                if not ninox_fields:
-                    st.warning("No pude leer los campos de la tabla en Ninox. Verifica el nombre/ID.")
-            except Exception as e:
-                st.error(f"No se pudo leer el esquema de la tabla Ninox: {e}")
-                ninox_fields = set()
+        rows, skipped = [], set()
+        iterator = df_final.head(1).iterrows() if debug_one else df_final.iterrows()
 
-            with st.expander("Campos detectados en Ninox"):
-                st.write(sorted(ninox_fields))
+        for _, row in iterator:
+            payload = {}
+            for c in df_final.columns:
+                dest = resolve_dest(c)
+                if fields_in_target and dest not in fields_in_target:
+                    skipped.add(dest); continue
+                val = row[c]
+                if dest in {"Hp (10)", "Hp (0.07)", "Hp (3)"}:
+                    val = _hp_out(val, as_text_pm=subir_pm_texto)
+                else:
+                    val = _as_str(val)
+                payload[dest] = val
+            rows.append({"fields": payload})
 
-            rows, skipped_cols = [], set()
-            iterator = df_final.head(1).iterrows() if debug_uno else df_final.iterrows()
-
-            for _, row in iterator:
-                fields_payload = {}
-                for col in df_final.columns:
-                    dest = resolve_dest_name(col)
-                    if ninox_fields and dest not in ninox_fields:
-                        skipped_cols.add(dest); continue
-                    val = row[col]
-                    if dest in {"Hp (10)", "Hp (0.07)", "Hp (3)"}:
-                        val = _hp_value(val, as_text_pm=subir_pm_como_texto)
-                    else:
-                        val = _to_str(val)
-                    fields_payload[dest] = val
-                rows.append({"fields": fields_payload})
-
-            if debug_uno:
-                st.caption("Payload (primer registro):")
-                st.json(rows[:1])
-
-            with st.spinner("Subiendo a Ninox..."):
-                res = ninox_insert_records(TEAM_ID, DATABASE_ID, DEFAULT_REPORT_TABLE_HINT, rows, batch_size=300)
+        if rows:
+            with st.spinner("Subiendo a Ninox…"):
+                res = ninox_insert_rows(TEAM_ID, DATABASE_ID, target_table, rows, batch_size=300)
 
             if res.get("ok"):
                 st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s).")
-                if skipped_cols:
-                    st.info("Columnas omitidas por no existir en Ninox:\n- " + "\n- ".join(sorted(skipped_cols)))
-                try:
-                    df_check = ninox_fetch_records(TEAM_ID, DATABASE_ID, DEFAULT_REPORT_TABLE_HINT)
-                    st.caption("Contenido reciente en BASE DE DATOS:")
-                    st.dataframe(df_check.tail(len(rows)), use_container_width=True)
-                except Exception:
-                    pass
+                if skipped:
+                    st.info("Columnas omitidas por no existir en Ninox:\n- " + "\n- ".join(sorted(skipped)))
             else:
                 st.error(f"❌ Error al subir: {res.get('error')}")
-                if skipped_cols:
-                    st.info("Revisa/crea en Ninox los campos omitidos:\n- " + "\n- ".join(sorted(skipped_cols)))
-
-# ===================== TAB 2 =====================
-with tab2:
-    st.subheader("📊 Reporte — Actual, Anual y de por Vida (por persona) desde Ninox BASE DE DATOS")
-
-    # Helpers TAB 2
-    def fetch_all_records(table_hint: str, page_size: int = 1000):
-        table_id = ninox_resolve_table_id(TEAM_ID, DATABASE_ID, table_hint)
-        url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
-        skip, out = 0, []
-        while True:
-            r = requests.get(url, headers=ninox_headers(), params={"limit": page_size, "skip": skip}, timeout=60)
-            r.raise_for_status()
-            chunk = r.json()
-            if not chunk: break
-            out.extend(chunk)
-            if len(chunk) < page_size: break
-            skip += page_size
-        return out
-
-    def normalize_df(records):
-        rows = []
-        for r in records:
-            f = r.get("fields", {}) or {}
-            rows.append({
-                "_id": r.get("id"),
-                "PERIODO DE LECTURA": f.get("PERIODO DE LECTURA"),
-                "CLIENTE": f.get("CLIENTE"),
-                "CÓDIGO DE DOSÍMETRO": str(
-                    f.get("CÓDIGO_DOSÍMETRO") or f.get("CÓDIGO DE DOSÍMETRO") or ""
-                ).strip(),
-                "NOMBRE": f.get("NOMBRE"),
-                "CÉDULA": f.get("CÉDULA"),
-                "FECHA DE LECTURA": f.get("FECHA DE LECTURA"),
-                "TIPO DE DOSÍMETRO": f.get("TIPO DE DOSÍMETRO"),
-                "Hp10_RAW":  as_value(f.get("Hp (10)")),
-                "Hp007_RAW": as_value(f.get("Hp (0.07)")),
-                "Hp3_RAW":   as_value(f.get("Hp (3)")),
-                "Hp10_NUM":  as_num(f.get("Hp (10)")),
-                "Hp007_NUM": as_num(f.get("Hp (0.07)")),
-                "Hp3_NUM":   as_num(f.get("Hp (3)")),
-            })
-        df = pd.DataFrame(rows)
-        df["FECHA_DE_LECTURA_DT"] = pd.to_datetime(
-            df["FECHA DE LECTURA"].apply(
-                lambda x: dtparse(str(x), dayfirst=True) if pd.notna(x) and str(x).strip() != "" else pd.NaT
-            ), errors="coerce"
-        )
-        df["NOMBRE_NORM"] = df["NOMBRE"].fillna("").astype(str).str.strip()
-        df["CÉDULA_NORM"] = df["CÉDULA"].fillna("").astype(str).str.strip()
-        return df
-
-    with st.spinner("Cargando datos desde Ninox (BASE DE DATOS)…"):
-        base_records = fetch_all_records(DEFAULT_REPORT_TABLE_HINT)
-        base = normalize_df(base_records)
-
-    if base.empty:
-        st.warning("No hay registros en la tabla BASE DE DATOS.")
-        st.stop()
-
-    with st.sidebar:
-        st.markdown("### ⚙️ Configuración (TAB 2)")
-        per_order = (base.groupby("PERIODO DE LECTURA")["FECHA_DE_LECTURA_DT"].max()
-                    .sort_values(ascending=False).index.astype(str).tolist())
-        per_valid = [p for p in per_order if _norm_period(p) != "CONTROL"]
-        periodo_actual = st.selectbox("Periodo actual", per_valid, index=0 if per_valid else None, key="tab2_periodo")
-        usar_anual_automatico = st.checkbox("ANUAL automático (mismo año del periodo actual)", value=True, key="tab2_auto")
-        periodos_anteriores = st.multiselect(
-            "Periodos anteriores (solo si ANUAL automático está desmarcado)",
-            [p for p in per_valid if p != periodo_actual],
-            default=[per_valid[1]] if (len(per_valid) > 1) else [], key="tab2_prev"
-        )
-        comp_opts = ["(todas)"] + sorted(base["CLIENTE"].dropna().astype(str).unique().tolist())
-        compania = st.selectbox("Cliente", comp_opts, index=0, key="tab2_comp")
-        tipo_opts = ["(todos)"] + sorted(base["TIPO DE DOSÍMETRO"].dropna().astype(str).unique().tolist())
-        tipo = st.selectbox("Tipo de dosímetro", tipo_opts, index=0, key="tab2_tipo")
-        files = st.file_uploader("Archivos de dosis (para filtrar por CÓDIGO DE DOSÍMETRO) — Opcional",
-                                 type=["csv","xlsx","xls"], accept_multiple_files=True, key="tab2_codes")
-
-    # Filtro cliente/tipo
-    df_company_type = base.copy()
-    if compania != "(todas)":
-        df_company_type = df_company_type[df_company_type["CLIENTE"].astype(str) == compania]
-    if tipo != "(todos)":
-        df_company_type = df_company_type[df_company_type["TIPO DE DOSÍMETRO"].astype(str) == tipo]
-    if df_company_type.empty:
-        st.warning("No hay registros que cumplan los filtros de Cliente y/o Tipo de dosímetro.")
-        st.stop()
-
-    # Filtro por códigos opcional
-    def read_codes_from_files(files) -> Set[str]:
-        codes: Set[str] = set()
-        for f in files or []:
-            raw = f.read(); f.seek(0)
-            name = f.name.lower()
-            try:
-                if name.endswith((".xlsx", ".xls")):
-                    df = pd.read_excel(BytesIO(raw))
-                else:
-                    df = None
-                    for enc in ("utf-8-sig","latin-1"):
-                        try:
-                            df = pd.read_csv(BytesIO(raw), sep=None, engine="python", encoding=enc); break
-                        except Exception: continue
-                    if df is None: df = pd.read_csv(BytesIO(raw))
-            except Exception:
-                continue
-            if df is None or df.empty: continue
-            cand = None
-            for c in df.columns:
-                cl = str(c).lower()
-                if any(k in cl for k in ["dosim","código","codigo","wb","dosímetro","dosimetro"]):
-                    cand = c; break
-            if cand is None:
-                for c in df.columns:
-                    if df[c].astype(str).str.contains(r"^WB\d{5,}$", case=False, na=False).any():
-                        cand = c; break
-            if cand is None: cand = df.columns[0]
-            codes |= set(df[cand].astype(str).str.strip())
-        return {c for c in codes if c and c.lower() != "nan"}
-
-    codes_filter: Optional[Set[str]] = read_codes_from_files(files) if files else None
-    if codes_filter:
-        st.success(f"Códigos detectados: {len(codes_filter)}")
-
-    # Construcción DF ACTUAL
-    keys = ["NOMBRE_NORM", "CÉDULA_NORM"]
-    df_curr = df_company_type[df_company_type["PERIODO DE LECTURA"].astype(str) == str(periodo_actual)].copy()
-    if codes_filter:
-        df_curr = df_curr[df_curr["CÓDIGO DE DOSÍMETRO"].isin(codes_filter)]
-    if df_curr.empty:
-        st.warning("No hay registros en el período actual con los filtros seleccionados.")
-        st.stop()
-
-    df_curr = df_curr.sort_values("FECHA_DE_LECTURA_DT")
-    personas_actual = set(zip(df_curr["NOMBRE_NORM"], df_curr["CÉDULA_NORM"]))
-    df_all_for_people = df_company_type.copy()
-    df_all_for_people["_pair"] = list(zip(df_all_for_people["NOMBRE_NORM"], df_all_for_people["CÉDULA_NORM"]))
-    df_all_for_people = df_all_for_people[df_all_for_people["_pair"].isin(personas_actual)]
-    if df_all_for_people.empty:
-        st.warning("No se encontró historial para las personas detectadas en el período actual.")
-        st.stop()
-
-    # ACTUAL
-    gb_curr_sum = df_curr.groupby(keys, as_index=False).agg({
-        "PERIODO DE LECTURA": "last",
-        "CLIENTE": "last",
-        "CÓDIGO DE DOSÍMETRO": "last",
-        "NOMBRE": "last",
-        "CÉDULA": "last",
-        "FECHA_DE_LECTURA_DT": "max",
-        "TIPO DE DOSÍMETRO": "last",
-        "Hp10_NUM": "sum", "Hp007_NUM": "sum", "Hp3_NUM": "sum",
-    })
-    gb_curr_raw = df_curr.groupby(keys).agg({
-        "Hp10_RAW": list, "Hp007_RAW": list, "Hp3_RAW": list
-    }).rename(columns={
-        "Hp10_RAW": "Hp10_ACTUAL_RAW_LIST",
-        "Hp007_RAW": "Hp007_ACTUAL_RAW_LIST",
-        "Hp3_RAW": "Hp3_ACTUAL_RAW_LIST"
-    }).reset_index()
-    out = gb_curr_sum.merge(gb_curr_raw, on=keys, how="left").rename(columns={
-        "Hp10_NUM": "Hp10_ACTUAL_NUM_SUM",
-        "Hp007_NUM": "Hp007_ACTUAL_NUM_SUM",
-        "Hp3_NUM": "Hp3_ACTUAL_NUM_SUM",
-    })
-
-    # ANUAL
-    usar_anual_automatico = st.session_state.get("tab2_auto", True)
-    if usar_anual_automatico:
-        if df_curr["FECHA_DE_LECTURA_DT"].notna().any():
-            current_year = int(df_curr["FECHA_DE_LECTURA_DT"].dt.year.mode().iloc[0])
+                if skipped:
+                    st.info("Revisa/crea en Ninox los campos omitidos:\n- " + "\n- ".join(sorted(skipped)))
         else:
-            m = re.search(r"\b(20\d{2}|19\d{2})\b", str(periodo_actual))
-            current_year = int(m.group(1)) if m else datetime.now().year
-        df_same_year = df_all_for_people[df_all_for_people["FECHA_DE_LECTURA_DT"].dt.year == current_year].copy()
-        df_prev_same_year = df_same_year[df_same_year["PERIODO DE LECTURA"].astype(str) != str(periodo_actual)].copy()
-        gb_prev_sum = df_prev_same_year.groupby(keys).agg({
-            "Hp10_NUM": "sum", "Hp007_NUM": "sum", "Hp3_NUM": "sum"
-        }).rename(columns={"Hp10_NUM": "Hp10_PREV_NUM_SUM",
-                           "Hp007_NUM": "Hp007_PREV_NUM_SUM",
-                           "Hp3_NUM": "Hp3_PREV_NUM_SUM"}).reset_index()
-        gb_prev_raw = df_prev_same_year.groupby(keys).agg({
-            "Hp10_RAW": list, "Hp007_RAW": list, "Hp3_RAW": list
-        }).rename(columns={"Hp10_RAW": "Hp10_PREV_RAW_LIST",
-                           "Hp007_RAW": "Hp007_PREV_RAW_LIST",
-                           "Hp3_RAW": "Hp3_PREV_RAW_LIST"}).reset_index()
-        out = out.merge(gb_prev_sum, on=keys, how="left").merge(gb_prev_raw, on=keys, how="left")
-    else:
-        df_prev = df_all_for_people[df_all_for_people["PERIODO DE LECTURA"].astype(str)
-                                    .isin(st.session_state.get("tab2_prev", []))].copy()
-        gb_prev_sum = df_prev.groupby(keys).agg({
-            "Hp10_NUM": "sum", "Hp007_NUM": "sum", "Hp3_NUM": "sum"
-        }).rename(columns={"Hp10_NUM": "Hp10_PREV_NUM_SUM",
-                           "Hp007_NUM": "Hp007_PREV_NUM_SUM",
-                           "Hp3_NUM": "Hp3_PREV_NUM_SUM"}).reset_index()
-        gb_prev_raw = df_prev.groupby(keys).agg({
-            "Hp10_RAW": list, "Hp007_RAW": list, "Hp3_RAW": list
-        }).rename(columns={"Hp10_RAW": "Hp10_PREV_RAW_LIST",
-                           "Hp007_RAW": "Hp007_PREV_RAW_LIST",
-                           "Hp3_RAW": "Hp3_PREV_RAW_LIST"}).reset_index()
-        out = out.merge(gb_prev_sum, on=keys, how="left").merge(gb_prev_raw, on=keys, how="left")
-
-    # VIDA
-    gb_life_sum = df_all_for_people.groupby(keys).agg({
-        "Hp10_NUM": "sum", "Hp007_NUM": "sum", "Hp3_NUM": "sum"
-    }).rename(columns={"Hp10_NUM": "Hp10_LIFE_NUM_SUM",
-                       "Hp007_NUM": "Hp007_LIFE_NUM_SUM",
-                       "Hp3_NUM": "Hp3_LIFE_NUM_SUM"}).reset_index()
-    gb_life_raw = df_all_for_people.groupby(keys).agg({
-        "Hp10_RAW": list, "Hp007_RAW": list, "Hp3_RAW": list
-    }).rename(columns={"Hp10_RAW": "Hp10_LIFE_RAW_LIST",
-                       "Hp007_RAW": "Hp007_LIFE_RAW_LIST",
-                       "Hp3_RAW": "Hp3_LIFE_RAW_LIST"}).reset_index()
-    out = out.merge(gb_life_sum, on=keys, how="left").merge(gb_life_raw, on=keys, how="left")
-
-    for c in ["Hp10_ACTUAL_NUM_SUM","Hp007_ACTUAL_NUM_SUM","Hp3_ACTUAL_NUM_SUM",
-              "Hp10_PREV_NUM_SUM","Hp007_PREV_NUM_SUM","Hp3_PREV_NUM_SUM",
-              "Hp10_LIFE_NUM_SUM","Hp007_LIFE_NUM_SUM","Hp3_LIFE_NUM_SUM"]:
-        if c not in out.columns: out[c] = 0.0
-        out[c] = out[c].fillna(0.0)
-
-    out["Hp (10) ACTUAL"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_ACTUAL_RAW_LIST", []), r["Hp10_ACTUAL_NUM_SUM"]), axis=1)
-    out["Hp (0.07) ACTUAL"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_ACTUAL_RAW_LIST", []), r["Hp007_ACTUAL_NUM_SUM"]), axis=1)
-    out["Hp (3) ACTUAL"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_ACTUAL_RAW_LIST",  []), r["Hp3_ACTUAL_NUM_SUM"]),  axis=1)
-
-    out["Hp (10) ANUAL"] = out.apply(lambda r: pm_or_sum(
-        merge_raw_lists(r.get("Hp10_ACTUAL_RAW_LIST"), r.get("Hp10_PREV_RAW_LIST")),
-        float(r["Hp10_ACTUAL_NUM_SUM"]) + float(r["Hp10_PREV_NUM_SUM"])
-    ), axis=1)
-    out["Hp (0.07) ANUAL"] = out.apply(lambda r: pm_or_sum(
-        merge_raw_lists(r.get("Hp007_ACTUAL_RAW_LIST"), r.get("Hp007_PREV_RAW_LIST")),
-        float(r["Hp007_ACTUAL_NUM_SUM"]) + float(r["Hp007_PREV_NUM_SUM"])
-    ), axis=1)
-    out["Hp (3) ANUAL"] = out.apply(lambda r: pm_or_sum(
-        merge_raw_lists(r.get("Hp3_ACTUAL_RAW_LIST"), r.get("Hp3_PREV_RAW_LIST")),
-        float(r["Hp3_ACTUAL_NUM_SUM"]) + float(r["Hp3_PREV_NUM_SUM"])
-    ), axis=1)
-
-    out["Hp (10) VIDA"]   = out.apply(lambda r: pm_or_sum(r.get("Hp10_LIFE_RAW_LIST", []), r["Hp10_LIFE_NUM_SUM"]), axis=1)
-    out["Hp (0.07) VIDA"] = out.apply(lambda r: pm_or_sum(r.get("Hp007_LIFE_RAW_LIST", []), r["Hp007_LIFE_NUM_SUM"]), axis=1)
-    out["Hp (3) VIDA"]    = out.apply(lambda r: pm_or_sum(r.get("Hp3_LIFE_RAW_LIST",  []), r["Hp3_LIFE_NUM_SUM"]), axis=1)
-
-    def fmt_fecha(dtval):
-        if pd.isna(dtval): return ""
-        try: return pd.to_datetime(dtval).strftime("%d/%m/%Y %H:%M")
-        except Exception: return str(dtval)
-
-    out["FECHA Y HORA DE LECTURA"] = out["FECHA_DE_LECTURA_DT"].apply(fmt_fecha)
-    out["PERIODO DE LECTURA"] = st.session_state.get("tab2_periodo", "")
-
-    out["__is_control"] = out["NOMBRE"].fillna("").astype(str).str.strip().str.upper().eq("CONTROL")
-    out = out.sort_values(["__is_control","NOMBRE","CÉDULA"], ascending=[False, True, True])
-
-    FINAL_COLS = [
-        "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-        "FECHA Y HORA DE LECTURA","TIPO DE DOSÍMETRO",
-        "Hp (10) ACTUAL","Hp (0.07) ACTUAL","Hp (3) ACTUAL",
-        "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-        "Hp (10) VIDA","Hp (0.07) VIDA","Hp (3) VIDA",
-    ]
-    for c in FINAL_COLS:
-        if c not in out.columns: out[c] = ""
-    out = out[FINAL_COLS]
-
-    st.markdown("#### Reporte final (vista previa)")
-    st.dataframe(out, use_container_width=True, hide_index=True)
-
-    # Descargas
-    csv_bytes = out.to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        "⬇️ Descargar CSV (UTF-8 con BOM)",
-        data=csv_bytes,
-        file_name=f"reporte_dosimetria_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv",
-        key="tab2_dl_csv"
-    )
-
-    def to_excel_simple(df: pd.DataFrame, sheet_name="Reporte"):
-        bio = BytesIO()
-        with pd.ExcelWriter(bio, engine="openpyxl") as w:
-            df.to_excel(w, index=False, sheet_name=sheet_name)
-        bio.seek(0); return bio.getvalue()
-
-    xlsx_simple = to_excel_simple(out)
-    st.download_button(
-        "⬇️ Descargar Excel (tabla simple)",
-        data=xlsx_simple,
-        file_name=f"reporte_dosimetria_tabla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="tab2_dl_xlsx_simple"
-    )
+            st.warning("No hay filas para subir.")
