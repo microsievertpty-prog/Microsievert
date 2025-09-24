@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-# Streamlit app: LISTA DE CÓDIGO (archivo) + Dosis (archivo)
-# Cruce EXCLUSIVO: CÓDIGO_DOSÍMETRO (LISTA) ↔ dosimeter (Dosis)
-# Normaliza códigos, filtra por PERIODO, calcula VALOR−CONTROL y exporta Excel.
+# Streamlit app: CRUCE EXCLUSIVO por CÓDIGO_DOSÍMETRO (LISTA) ↔ dosimeter (Dosis)
+# Lee AMBAS tablas desde ARCHIVOS (CSV/XLS/XLSX), normaliza códigos y periodos (AGO-25 → AGOSTO 2025),
+# filtra por uno o varios periodos (vacío = TODOS), calcula VALOR−CONTROL y exporta Excel.
 
 import re
 from io import BytesIO
@@ -11,22 +11,22 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 import streamlit as st
 
-# ===================== UI =====================
-st.set_page_config(page_title="Dosimetría — Match por CÓDIGO_DOSÍMETRO ↔ dosimeter", page_icon="🧪", layout="wide")
-st.title("🧪 Dosimetría — Match exacto CÓDIGO_DOSÍMETRO ↔ dosimeter (solo archivos)")
-st.caption("Sube tu LISTA DE CÓDIGO y tu archivo de dosis. Hacemos el cruce SOLO con esas columnas, normalizando códigos.")
+# ===================== UI / App =====================
+st.set_page_config(page_title="Dosimetría — Match CÓDIGO_DOSÍMETRO ↔ dosimeter", page_icon="🧪", layout="wide")
+st.title("🧪 Dosimetría — Match exacto CÓDIGO_DOSÍMETRO ↔ dosimeter (archivos)")
+st.caption("Sube tu LISTA DE CÓDIGO y el archivo de dosis. El cruce se hace SOLO por el código normalizado.")
 
 # ===================== Helpers =====================
 def _norm_code(x: str) -> str:
     """
-    Normaliza un código a formato 'WB' + 6 dígitos.
-    Acepta '57', 'WB57', 'WB000057', ' wb-000057 ' → 'WB000057'
+    Normaliza un código a formato estándar 'WB' + 6 dígitos.
+    Acepta: '57', 'WB57', 'WB000057', '  /WB000057 ' → 'WB000057'
     """
     if x is None:
         return ""
     s = str(x).strip().upper()
-    s = s.replace("\u00A0", " ").strip()     # NBSP
-    s = re.sub(r"[^A-Z0-9]", "", s)          # quita no alfanumérico
+    s = s.replace("\u00A0", " ").strip()      # NBSP
+    s = re.sub(r"[^A-Z0-9]", "", s)           # quita todo lo no alfanumérico
 
     m_dig = re.fullmatch(r"(\d+)", s)
     if m_dig:
@@ -38,16 +38,16 @@ def _norm_code(x: str) -> str:
 
     if re.fullmatch(r"WB\d{6}", s):
         return s
-    return s
+    return s  # deja pasar códigos no WB (si existieran)
 
 def _read_csv_robusto(upload) -> pd.DataFrame:
     """
-    Intenta leer un CSV probando varias codificaciones y separadores para evitar UnicodeDecodeError.
+    Lectura robusta de CSV probando codificaciones y separadores para evitar UnicodeDecodeError.
     """
     raw = upload.read()
     upload.seek(0)
     codificaciones = ["utf-8-sig", "utf-8", "latin-1", "cp1252"]
-    separadores = [None, ",", ";", "\t", "|"]   # None = autodetección (engine='python')
+    separadores = [None, ",", ";", "\t", "|"]   # None => autodetección (engine='python')
     ultimo_error = None
     for enc in codificaciones:
         for sep in separadores:
@@ -78,7 +78,7 @@ def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
     norm = (df.columns.astype(str).str.strip().str.lower().str.replace(r"\s+", " ", regex=True))
     df.columns = norm
 
-    # Mapeo flexible
+    # Mapeo flexible (incluye variantes)
     candidates = {
         "cédula":             ["cédula","cedula","id","documento","ced"],
         "código usuario":     ["código usuario","codigo usuario","codigo_usuario","codigo de usuario","usuario"],
@@ -89,7 +89,7 @@ def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
         "código_cliente":     ["código cliente","codigo cliente","codigo_cliente","id cliente","cliente id"],
         "etiqueta":           ["etiqueta","tag","label"],
         "código_dosímetro":   ["código dosímetro","codigo dosimetro","codigo_dosimetro","dosímetro","dosimetro","dosimeter","codigo"],
-        "periodo de lectura": ["periodo de lectura","período de lectura","periodo","período","periodo lectura","lectura periodo"],
+        "periodo de lectura": ["periodo de lectura","período de lectura","periodo","período","periodo lectura","lectura periodo","periodo (ej. agosto 2025)"],
         "tipo de dosímetro":  ["tipo de dosímetro","tipo dosimetro","tipo_dosimetro","tipo"],
     }
 
@@ -101,7 +101,7 @@ def leer_lista_codigo_archivo(upload) -> Optional[pd.DataFrame]:
     return out
 
 def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
-    """Estándar + derivados para la LISTA DE CÓDIGO."""
+    """Estándar + derivados para la LISTA DE CÓDIGO, con normalización de periodos (AGO-25 → AGOSTO 2025)."""
     needed = [
         "CÉDULA","CÓDIGO USUARIO","NOMBRE","APELLIDO","FECHA DE NACIMIENTO",
         "CLIENTE","CÓDIGO_CLIENTE","ETIQUETA","CÓDIGO_DOSÍMETRO",
@@ -113,13 +113,45 @@ def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
 
     ap = df["APELLIDO"].fillna("").astype(str).str.strip()
     df["NOMBRE_COMPLETO"] = (df["NOMBRE"].fillna("").astype(str).str.strip() + " " + ap).str.strip()
+
+    # Código estandarizado
     df["CODIGO"] = df["CÓDIGO_DOSÍMETRO"].fillna("").astype(str).map(_norm_code)
 
-    df["PERIODO_NORM"] = (
-        df["PERIODO DE LECTURA"].fillna("").astype(str).str.strip().str.upper()
-        .str.replace(r"\s+", " ", regex=True)
-        .str.replace(r"\.+$", "", regex=True)
-    )
+    # Periodo normalizado
+    meses_largos = ["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO",
+                    "JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"]
+    meses_cortos = ["ENE","FEB","MAR","ABR","MAY","JUN","JUL","AGO","SEP","OCT","NOV","DIC"]
+    mapa_mes = {m: meses_largos[i] for i, m in enumerate(meses_cortos)}
+
+    def parse_periodo(raw: str) -> str:
+        if raw is None:
+            return ""
+        s = str(raw).strip().upper()
+        s = s.replace("\u00A0", " ").strip()
+        s = re.sub(r"\s+", " ", s)
+        s = re.sub(r"\.+$", "", s)
+
+        # Formatos tipo "AGO-25" / "ago 25" / "ago25"
+        m = re.match(r"^(ENE|FEB|MAR|ABR|MAY|JUN|JUL|AGO|SEP|OCT|NOV|DIC)[\s\-]?(\d{2}|\d{4})$", s)
+        if m:
+            mes_3 = m.group(1)
+            yy = m.group(2)
+            yyyy = int(yy) + 2000 if len(yy) == 2 else int(yy)
+            return f"{mapa_mes[mes_3]} {yyyy}"
+
+        # Ya “AGOSTO 2025” completo
+        m2 = re.match(r"^(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+(\d{4})$", s)
+        if m2:
+            return f"{m2.group(1)} {m2.group(2)}"
+
+        # Último recurso: intentar parsear fecha
+        try:
+            dt = pd.to_datetime(s, errors="raise", dayfirst=True)
+            return f"{meses_largos[dt.month-1]} {dt.year}"
+        except Exception:
+            return s  # lo deja como está
+
+    df["PERIODO_NORM"] = df["PERIODO DE LECTURA"].apply(parse_periodo)
 
     def is_control_row(r):
         for k in ["ETIQUETA","NOMBRE","CÉDULA","CÓDIGO USUARIO"]:
@@ -137,7 +169,7 @@ def normalize_lista_codigo(df: pd.DataFrame) -> pd.DataFrame:
 def leer_dosis(upload) -> Optional[pd.DataFrame]:
     """
     Lee archivo de dosis con columnas (dosimeter, hp10dose, hp0.07dose, hp3dose, timestamp opcional).
-    Soporta CSV en múltiples codificaciones/separadores y Excel.
+    Soporta CSV (codificaciones/separadores varios) y Excel.
     """
     if not upload:
         return None
@@ -155,7 +187,7 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
             .str.replace('.', '', regex=False))
     df.columns = norm
 
-    # Mapas de nombres
+    # Mapas
     if 'dosimeter' not in df.columns:
         for alt in ['dosimetro','codigo','codigodosimetro','codigo_dosimetro']:
             if alt in df.columns:
@@ -221,8 +253,8 @@ def aplicar_valor_menos_control(registros: List[Dict[str,Any]]):
                 r[key] = "PM" if diff < 0.005 else f"{diff:.2f}"
     return registros
 
-# ===================== UI: Subidas =====================
-st.markdown("### 1) Subir **LISTA DE CÓDIGO** (tabla de lectura)")
+# ===================== UI: Subidas y flujo =====================
+st.markdown("### 1) Subir **LISTA DE CÓDIGO**")
 upl_lista = st.file_uploader("Selecciona CSV/XLS/XLSX (LISTA DE CÓDIGO)", type=["csv","xls","xlsx"], key="upl_lista")
 df_lista_raw = leer_lista_codigo_archivo(upl_lista) if upl_lista else None
 
@@ -233,7 +265,7 @@ if df_lista_raw is not None:
     # Normaliza lista
     df_lista = normalize_lista_codigo(df_lista_raw)
 
-    # Periodos (de la LISTA)
+    # Periodos (de la LISTA, ya normalizados)
     periodos = sorted([p for p in df_lista["PERIODO_NORM"].dropna().astype(str).unique() if p.strip() != ""])
     st.markdown("#### Filtrar por PERIODO DE LECTURA (multi; vacío = TODOS)")
     periods_sel = st.multiselect("PERIODO DE LECTURA", options=periodos, default=[])
@@ -332,7 +364,7 @@ if df_lista_raw is not None:
                         registros = aplicar_valor_menos_control(registros)
                         df_final = pd.DataFrame(registros)
 
-                        # Limpieza
+                        # Limpieza suave
                         df_final['PERIODO DE LECTURA'] = (
                             df_final['PERIODO DE LECTURA'].astype(str)
                             .str.replace(r'\.+$', '', regex=True).str.strip()
@@ -348,7 +380,7 @@ if df_lista_raw is not None:
                         st.dataframe(df_final, use_container_width=True)
                         st.session_state["df_final"] = df_final
 
-                        # Exportar Excel
+                        # Exportar Excel simple
                         def to_excel_simple(df: pd.DataFrame):
                             bio = BytesIO()
                             with pd.ExcelWriter(bio, engine="openpyxl") as w:
