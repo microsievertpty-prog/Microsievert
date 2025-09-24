@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional, Set
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.utils import get_column_letter
 
 # ===================== NINOX CONFIG =====================
 API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"
@@ -19,11 +19,11 @@ TEAM_ID     = "YrsYfTegptdZcHJEj"
 DATABASE_ID = "ow1geqnkz00e"
 BASE_URL    = "https://api.ninox.com/v1"
 
-# Tablas: lee de LISTA DE CODIGO, sube y reporta a BASE DE DATOS
+# Tablas por defecto: lee de LISTA DE CODIGO, sube/reporta en BASE DE DATOS
 DEFAULT_BASE_TABLE_ID   = "LISTA DE CODIGO"   # lectura
 DEFAULT_REPORT_TABLE_ID = "BASE DE DATOS"     # escritura / reportes
 
-# ===================== STREAMLIT =====================
+# ===================== STREAMLIT CONFIG =====================
 st.set_page_config(page_title="Microsievert - Dosimetría", page_icon="🧪", layout="wide")
 st.title("🧪 Sistema de Gestión de Dosimetría — Microsievert")
 st.caption("Ninox + VALOR−CONTROL + Reporte Actual/Anual/Vida + Exportación")
@@ -43,6 +43,7 @@ def ninox_list_tables(team_id: str, db_id: str):
     return r.json()
 
 def ninox_resolve_table_id(team_id: str, db_id: str, table_hint: str) -> str:
+    """Acepta ID o NOMBRE de tabla y devuelve el ID real para la API."""
     hint = (table_hint or "").strip()
     if hint and " " not in hint and len(hint) <= 8:
         return hint
@@ -55,41 +56,29 @@ def ninox_resolve_table_id(team_id: str, db_id: str, table_hint: str) -> str:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def ninox_fetch_records(team_id: str, db_id: str, table_hint: str, page_size: int = 1000) -> pd.DataFrame:
+    """Lee todos los registros de una tabla Ninox (por ID o nombre) y devuelve un DataFrame de 'fields'."""
     table_id = ninox_resolve_table_id(team_id, db_id, table_hint)
-    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
+    base = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
     out = []
-    try:
-        skip = 0
-        while True:
-            r = requests.get(url, headers=ninox_headers(), params={"limit": page_size, "skip": skip}, timeout=60)
-            if r.status_code == 404:
-                raise FileNotFoundError(f"Tabla '{table_hint}' (ID '{table_id}') no existe.")
-            r.raise_for_status()
-            chunk = r.json()
-            if not chunk: break
-            out.extend(chunk)
-            if len(chunk) < page_size: break
-            skip += page_size
-    except FileNotFoundError:
-        raise
-    except Exception:
-        offset = 0
-        while True:
-            r = requests.get(url, headers=ninox_headers(), params={"perPage": page_size, "offset": offset}, timeout=60)
-            if r.status_code == 404:
-                raise FileNotFoundError(f"Tabla '{table_hint}' (ID '{table_id}') no existe.")
-            r.raise_for_status()
-            batch = r.json()
-            if not batch: break
-            out.extend(batch)
-            if len(batch) < page_size: break
-            offset += page_size
+    # limit/skip
+    skip = 0
+    while True:
+        r = requests.get(base, headers=ninox_headers(), params={"limit": page_size, "skip": skip}, timeout=60)
+        if r.status_code == 404:
+            raise FileNotFoundError(f"Tabla '{table_hint}' (ID '{table_id}') no existe.")
+        r.raise_for_status()
+        chunk = r.json()
+        if not chunk: break
+        out.extend(chunk)
+        if len(chunk) < page_size: break
+        skip += page_size
     rows = [x.get("fields", {}) for x in out]
     df = pd.DataFrame(rows) if rows else pd.DataFrame()
     df.columns = [str(c) for c in df.columns]
     return df
 
 def ninox_insert_records(team_id: str, db_id: str, table_hint: str, rows: list, batch_size: int = 400):
+    """Inserta registros {fields:{...}} en la tabla indicada (por ID o nombre)."""
     table_id = ninox_resolve_table_id(team_id, db_id, table_hint)
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables/{table_id}/records"
     if not rows:
@@ -105,6 +94,7 @@ def ninox_insert_records(team_id: str, db_id: str, table_hint: str, rows: list, 
 
 @st.cache_data(ttl=120, show_spinner=False)
 def ninox_get_table_fields(team_id: str, db_id: str, table_hint: str):
+    """Devuelve el conjunto de nombres de campos existentes en la tabla Ninox."""
     table_id = ninox_resolve_table_id(team_id, db_id, table_hint)
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
     r = requests.get(url, headers=ninox_headers(), timeout=30)
@@ -121,8 +111,6 @@ def ninox_get_table_fields(team_id: str, db_id: str, table_hint: str):
     return fields
 
 # ===================== Utilidades =====================
-def round2(x: float) -> float: return float(f"{x:.2f}")
-
 def as_value(v: Any):
     if v is None: return ""
     s = str(v).strip().replace(",", ".")
@@ -150,7 +138,7 @@ def pm_or_sum(raws, numeric_sum) -> Any:
         if _pd.isna(total): total = 0.0
     except Exception:
         total = 0.0
-    return round2(total)
+    return float(f"{total:.2f}")
 
 def merge_raw_lists(*vals):
     import pandas as _pd
@@ -162,7 +150,6 @@ def merge_raw_lists(*vals):
         else: out.append(v)
     return out
 
-# ===================== Excel simple =====================
 def exportar_excel_simple_valor_control(df_final: pd.DataFrame) -> bytes:
     wb = Workbook(); ws = wb.active; ws.title = "REPORTE DE DOSIS"
     border = Border(left=Side(style='thin'), right=Side(style='thin'),
@@ -288,7 +275,7 @@ def normalize_lista_codigo(df_raw: pd.DataFrame) -> pd.DataFrame:
     df["CÉDULA"] = df["CÉDULA"].fillna("").astype(str).str.strip()
     return df
 
-# ===================== Construcción de registros =====================
+# ===================== Construcción de registros desde LISTA DE CODIGO =====================
 def construir_registros_desde_lista_codigo(df_lista: pd.DataFrame,
                                            df_dosis: pd.DataFrame,
                                            periodo_filtro: str = "— TODOS —") -> List[Dict[str, Any]]:
@@ -353,7 +340,6 @@ def construir_registros_desde_lista_codigo(df_lista: pd.DataFrame,
     for r in registros: r.pop("_IS_CONTROL", None)
     return registros
 
-# ===================== Valor - Control =====================
 def periodo_desde_fecha(periodo_str: str, fecha_str: str) -> str:
     per = (periodo_str or "").strip().upper()
     per = re.sub(r'\.+$', '', per).strip()
@@ -381,7 +367,7 @@ def aplicar_valor_menos_control(registros):
                 r[key] = "PM" if diff < 0.005 else f"{diff:.2f}"
     return registros
 
-# ===================== TABS =====================
+# ===================== UI (Tabs) =====================
 tab1, tab2 = st.tabs(["📥 Carga, VALOR−CONTROL y Subida", "📊 Reporte Actual / Anual / Vida"])
 
 # ===================== TAB 1 =====================
@@ -399,8 +385,6 @@ with tab1:
 
     # Leer LISTA DE CODIGO
     try:
-        if show_tables:
-            st.expander("Tablas Ninox (debug)").json(ninox_list_tables(TEAM_ID, DATABASE_ID))
         df_lista_raw = ninox_fetch_records(TEAM_ID, DATABASE_ID, base_table_id)
         if df_lista_raw.empty:
             st.warning("No hay datos en LISTA DE CODIGO.")
@@ -408,7 +392,32 @@ with tab1:
         else:
             df_participantes = normalize_lista_codigo(df_lista_raw)
             st.success(f"Conectado a Ninox. Tabla: {base_table_id}")
-            st.dataframe(df_participantes.head(15), use_container_width=True)
+
+            # Vista previa mejorada (mostrar todo / N filas / descarga)
+            with st.expander("📋 Vista de LISTA DE CODIGO", expanded=True):
+                total_rows = len(df_participantes)
+                st.caption(f"Registros cargados: **{total_rows}**")
+                col_a, col_b = st.columns([1,1])
+                with col_a:
+                    mostrar_todo = st.checkbox("Mostrar TODO", value=False, key="ver_todo_lista")
+                with col_b:
+                    n_preview = st.number_input(
+                        "Filas a mostrar (si no muestra todo)",
+                        min_value=10, max_value=max(10, total_rows),
+                        value=min(100, total_rows), step=10, key="n_preview_lista"
+                    )
+                if mostrar_todo:
+                    st.dataframe(df_participantes, use_container_width=True, height=520)
+                else:
+                    st.dataframe(df_participantes.head(int(n_preview)), use_container_width=True, height=520)
+
+                st.download_button(
+                    "⬇️ Descargar LISTA DE CODIGO (CSV completo)",
+                    data=df_participantes.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"lista_de_codigo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv",
+                    key="dl_lista_codigo"
+                )
     except Exception as e:
         st.error(f"Error leyendo {base_table_id}: {e}")
         df_participantes = None
@@ -422,9 +431,11 @@ with tab1:
 
     col1, col2 = st.columns([1,1])
     with col1:
-        nombre_reporte = st.text_input("Nombre archivo (sin extensión)",
-                                       value=f"ReporteDosimetria_{datetime.now().strftime('%Y-%m-%d')}",
-                                       key="tab1_name")
+        nombre_reporte = st.text_input(
+            "Nombre archivo (sin extensión)",
+            value=f"ReporteDosimetria_{datetime.now().strftime('%Y-%m-%d')}",
+            key="tab1_name"
+        )
     with col2:
         btn_proc = st.button("✅ Procesar", type="primary", use_container_width=True, key="tab1_btn_proc")
 
@@ -695,7 +706,6 @@ with tab2:
     df_all_for_people = df_company_type.copy()
     df_all_for_people["_pair"] = list(zip(df_all_for_people["NOMBRE_NORM"], df_all_for_people["CÉDULA_NORM"]))
     df_all_for_people = df_all_for_people[df_all_for_people["_pair"].isin(personas_actual)]
-
     if df_all_for_people.empty:
         st.warning("No se encontró historial para las personas detectadas en el período actual.")
         st.stop()
@@ -724,7 +734,7 @@ with tab2:
         "Hp3_NUM": "Hp3_ACTUAL_NUM_SUM",
     })
 
-    # ANUAL (suma Actual + Previos)
+    # ANUAL
     usar_anual_automatico = st.session_state.get("tab2_auto", True)
     if usar_anual_automatico:
         if df_curr["FECHA_DE_LECTURA_DT"].notna().any():
@@ -844,3 +854,5 @@ with tab2:
                        file_name=f"reporte_dosimetria_tabla_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        key="tab2_dl_xlsx_simple")
+
+
