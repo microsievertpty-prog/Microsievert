@@ -599,6 +599,8 @@ with tab2:
                 if (not personas.empty) or (not control.empty):
                     from io import BytesIO
                     buf = BytesIO()
+                    # Guardar copia DETALLE preservando valores originales (incluye PM)
+                    df_nx_detalle = df_nx.copy()
                     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                         if not personas.empty:
                             to_save = per_anual.copy()
@@ -610,8 +612,15 @@ with tab2:
                             for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                                 cs[c] = cs[c].astype(float).round(2)
                             cs.to_excel(writer, index=False, sheet_name="Control")
+                        # Hoja Detalle con los registros base (preserva PM)
+                        if not df_nx_detalle.empty:
+                            df_nx_detalle.to_excel(writer, index=False, sheet_name="Detalle")
                     st.download_button(
                         label="📥 Descargar Reporte (Excel)",
+                        data=buf.getvalue(),
+                        file_name=f"Reporte_Dosimetria_Ninox_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )",
                         data=buf.getvalue(),
                         file_name=f"Reporte_Dosimetria_Ninox_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -677,12 +686,19 @@ with tab2:
                         for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                             cs[c] = cs[c].astype(float).round(2)
                         cs.to_excel(writer, index=False, sheet_name="Control")
+                    # Hoja Detalle con los registros tal como se muestran (incluye PM y 0.00)
+                    det = st.session_state.get("df_final_vista")
+                    if det is not None and not det.empty:
+                        det.to_excel(writer, index=False, sheet_name="Detalle")
                 st.download_button(
                     label="📥 Descargar Reporte (Excel)",
+                    data=buf.getvalue(),
+                    file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )",
                     data=buf.getvalue(),
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
                 st.info("No hay datos para descargar aún. Genera el reporte primero.")
-
