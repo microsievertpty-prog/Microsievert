@@ -56,7 +56,7 @@ def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
         rows.append({k: fields.get(k) for k in [
             "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO",
             "NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
-            "Hp (10)","Hp (0.07)","Hp (3)"
+            "Hp (10),"Hp (0.07),"Hp (3)
         ]})
     df = pd.DataFrame(rows)
     # Normaliza PERIODO a texto completo por si viene abreviado
@@ -253,7 +253,7 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
         df = parse_csv_robust(upload)
     cols = (df.columns.astype(str).str.strip().str.lower()
             .str.replace(" ", "", regex=False)
-            .str.replace("(", "").str.replace(")", "")
+            .str.replace("(", "").str.replace("), "")
             .str.replace(".", "", regex=False))
     df.columns = cols
     if "dosimeter" not in df.columns:
@@ -339,7 +339,7 @@ def aplicar_resta_control_y_formato(df_final: pd.DataFrame, umbral_pm: float = 0
     for c in ["PERIODO DE LECTURA","CLIENTE","TIPO DE DOSÍMETRO","NOMBRE"]:
         if c not in df.columns:
             df[c] = ""
-    for h in ["Hp (10)", "Hp (0.07)", "Hp (3)"]:
+    for h in ["Hp (10), "Hp (0.07), "Hp (3)"]:
         if h not in df.columns:
             df[h] = 0.0
         df[h] = pd.to_numeric(df[h], errors="coerce").fillna(0.0)
@@ -404,7 +404,7 @@ def aplicar_resta_control_y_formato(df_final: pd.DataFrame, umbral_pm: float = 0
 
     # Control: solo formateo 3 dec
     df_ctrl_view = df_ctrl.copy()
-    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+    for h in ["Hp (10),"Hp (0.07),"Hp (3)"]:
         df_ctrl_view[h] = df_ctrl_view[h].map(lambda x: f"{float(x):.2f}")
 
     df_vista = pd.concat([df_ctrl_view, out_view], ignore_index=True)
@@ -421,7 +421,7 @@ tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
 # ------------------ TAB 1 ------------------
 with tab1:
     st.subheader("1) Cargar LISTA DE CÓDIGO")
-    upl_lista = st.file_uploader("Sube la LISTA DE CÓDIGO (CSV / XLS / XLSX)", type=["csv","xls","xlsx"], key="upl_lista")
+    upl_lista = st.file_uploader("Sube la LISTA DE CÓDIGO (CSV / XLS / XLSX), type=["csv","xls","xlsx"], key="upl_lista")
     df_lista = leer_lista_codigo(upl_lista) if upl_lista else None
     if df_lista is not None and not df_lista.empty:
         st.success(f"LISTA cargada: {len(df_lista)} filas")
@@ -430,14 +430,14 @@ with tab1:
         st.info("LISTA vacía o sin datos")
 
     st.subheader("2) Subir Archivo de Dosis")
-    upl_dosis = st.file_uploader("Selecciona CSV/XLS/XLSX (dosis)", type=["csv","xls","xlsx"], key="upl_dosis")
+    upl_dosis = st.file_uploader("Selecciona CSV/XLS/XLSX (dosis), type=["csv","xls","xlsx"], key="upl_dosis")
     df_dosis = leer_dosis(upl_dosis) if upl_dosis else None
     if df_dosis is not None and not df_dosis.empty:
         st.success(f"Dosis cargadas: {len(df_dosis)} fila(s)")
         st.dataframe(df_dosis.head(15), use_container_width=True)
 
     per_options = sorted(df_lista["PERIODO DE LECTURA"].dropna().astype(str).str.upper().unique().tolist()) if df_lista is not None else []
-    periodos_sel = st.multiselect("Filtrar por PERIODO DE LECTURA (elige uno o varios; vacío = TODOS)", per_options, default=[])
+    periodos_sel = st.multiselect("Filtrar por PERIODO DE LECTURA (elige uno o varios; vacío = TODOS), per_options, default=[])
 
     subir_pm_como_texto = st.checkbox("Guardar 'PM' como texto en Ninox", value=True)
 
@@ -527,7 +527,7 @@ with tab2:
     # Selector de fuente del reporte
     fuente = st.radio("Fuente de datos para el reporte:", [
         "Usar datos procesados en esta sesión",
-        "Leer directamente de Ninox (tabla BASE DE DATOS)"
+        "Leer directamente de Ninox (tabla BASE DE DATOS)
     ], index=0)
 
     df_vista = st.session_state.get("df_final_vista")
@@ -549,7 +549,7 @@ with tab2:
                     per_sel = st.multiselect("Filtrar PERIODO DE LECTURA", per_opts, default=per_opts)
                 cli_opts = sorted(df_nx["CLIENTE"].dropna().astype(str).unique().tolist()) if "CLIENTE" in df_nx.columns else []
                 with col2:
-                    cli_sel = st.multiselect("Filtrar CLIENTE (opcional)", cli_opts, default=cli_opts)
+                    cli_sel = st.multiselect("Filtrar CLIENTE (opcional), cli_opts, default=cli_opts)
 
                 if per_sel:
                     df_nx = df_nx[df_nx["PERIODO DE LECTURA"].isin(per_sel)]
@@ -557,7 +557,7 @@ with tab2:
                     df_nx = df_nx[df_nx["CLIENTE"].isin(cli_sel)]
 
                 # Convertir Hp a numérico (PM⇒0) para sumar
-                for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+                for h in ["Hp (10),"Hp (0.07),"Hp (3)"]:
                     if h in df_nx.columns:
                         df_nx[h] = df_nx[h].apply(hp_to_num)
 
@@ -620,11 +620,11 @@ with tab2:
                     if 'df_nx_detalle' in locals():
                         df_nx_detalle.to_excel(writer, index=False, sheet_name="Detalle")
                 st.download_button(
-                    label="📥 Descargar Reporte (Excel)",
+                    label="📥 Descargar Reporte (Excel),
                     data=buf.getvalue(),
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )",
+                ),
                     data=buf.getvalue(),
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
