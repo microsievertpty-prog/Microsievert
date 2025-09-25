@@ -458,36 +458,62 @@ with tab1:
 
 # ------------------ TAB 2 ------------------
 with tab2:
-    st.subheader("📊 Reporte Final: suma por **CÓDIGO DE USUARIO** (personas) y **CONTROL** por **CÓDIGO DE DOSÍMETRO**")
+    st.subheader("📊 Reporte Final (ANUAL y DE POR VIDA)")
     df_vista = st.session_state.get("df_final_vista")
     df_num   = st.session_state.get("df_final_num")
 
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
     else:
-        # Personas (excluye CONTROL)
+        # =============== PERSONAS (por CÓDIGO DE USUARIO) =================
         personas = df_num[df_num["NOMBRE"].str.strip().str.upper() != "CONTROL"].copy()
         if not personas.empty:
-            per_group = personas.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
+            # Sumas ANUALES por CÓDIGO DE USUARIO (sobre los valores ya corregidos por CONTROL)
+            per_anual = personas.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
                 "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
                 "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
             }).rename(columns={
-                "_Hp10_NUM":"Hp10_SUM","_Hp007_NUM":"Hp007_SUM","_Hp3_NUM":"Hp3_SUM"
+                "_Hp10_NUM":"Hp (10) ANUAL",
+                "_Hp007_NUM":"Hp (0.07) ANUAL",
+                "_Hp3_NUM":"Hp (3) ANUAL"
             })
-            st.markdown("### Personas — Suma por **CÓDIGO DE USUARIO** (corregido por CONTROL)")
-            st.dataframe(per_group, use_container_width=True)
-        else:
-            st.info("No hay filas de personas (todas serían CONTROL).")
+            # "DE POR VIDA" por ahora igual al ANUAL (mismo valor)
+            per_anual["Hp (10) DE POR VIDA"]  = per_anual["Hp (10) ANUAL"]
+            per_anual["Hp (0.07) DE POR VIDA"] = per_anual["Hp (0.07) ANUAL"]
+            per_anual["Hp (3) DE POR VIDA"]    = per_anual["Hp (3) ANUAL"]
+            # Formato a 2 decimales
+            for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
+                per_anual[c] = per_anual[c].astype(float).map(lambda v: f"{v:.2f}")
 
-        # CONTROL — sumar controles
+            st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL y DE POR VIDA)")
+            st.dataframe(per_anual, use_container_width=True)
+        else:
+            st.info("No hay filas de personas para el reporte.")
+
+        # =============== CONTROL (por CÓDIGO DE DOSÍMETRO) =================
         control_vista = df_vista[df_vista["NOMBRE"].str.strip().str.upper() == "CONTROL"].copy()
         if not control_vista.empty:
+            # Convertir a numérico para sumar
             for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
                 control_vista[h] = pd.to_numeric(control_vista[h], errors="coerce").fillna(0.0)
-            ctrl_group = control_vista.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
-                "CLIENTE":"last","Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
-            }).rename(columns={"Hp (10)":"Hp10_SUM","Hp (0.07)":"Hp007_SUM","Hp (3)":"Hp3_SUM"})
-            st.markdown("### CONTROL — Suma por **CÓDIGO DE DOSÍMETRO**")
-            st.dataframe(ctrl_group, use_container_width=True)
+            ctrl_anual = control_vista.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
+                "CLIENTE":"last",
+                "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
+            }).rename(columns={
+                "Hp (10)":"Hp (10) ANUAL",
+                "Hp (0.07)":"Hp (0.07) ANUAL",
+                "Hp (3)":"Hp (3) ANUAL"
+            })
+            # DE POR VIDA = ANUAL (mismo criterio)
+            ctrl_anual["Hp (10) DE POR VIDA"]  = ctrl_anual["Hp (10) ANUAL"]
+            ctrl_anual["Hp (0.07) DE POR VIDA"] = ctrl_anual["Hp (0.07) ANUAL"]
+            ctrl_anual["Hp (3) DE POR VIDA"]    = ctrl_anual["Hp (3) ANUAL"]
+            # Formato 2 decimales
+            for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
+                ctrl_anual[c] = ctrl_anual[c].astype(float).map(lambda v: f"{v:.2f}")
+
+            st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL y DE POR VIDA)")
+            st.dataframe(ctrl_anual, use_container_width=True)
         else:
-            st.info("No hay filas de CONTROL en el cruce actual.")
+            st.info("No hay filas de CONTROL para el reporte.")
+
