@@ -75,6 +75,16 @@ def hp_to_num(x, umbral_pm: float = 0.005) -> float:
         return float(xs)
     except Exception:
         return 0.0
+
+def pmfmt(v, thr: float = 0.005) -> str:
+    """Devuelve 'PM' si v<thr, si no devuelve 0.00 con 2 decimales."""
+    try:
+        f = float(v)
+    except Exception:
+        s = str(v).strip()
+        return s if s else "PM"
+    return "PM" if f < thr else f"{f:.2f}"
+
 def ninox_headers():
     return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
@@ -602,16 +612,24 @@ with tab2:
                     # Guardar copia DETALLE preservando valores originales (incluye PM)
                     df_nx_detalle = df_nx.copy()
                     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                    if not per_view.empty:
+                    # Hojas generadas desde Ninox
+                    if 'per_view' in locals() and not per_view.empty:
                         per_view.to_excel(writer, index=False, sheet_name="Personas")
-                    if not ctrl_view.empty:
+                    if 'ctrl_view' in locals() and not ctrl_view.empty:
                         ctrl_view.to_excel(writer, index=False, sheet_name="Control")
-                    det = st.session_state.get("df_final_vista")
-                    if det is not None and not det.empty:
-                        det.to_excel(writer, index=False, sheet_name="Detalle")
+                    if 'df_nx_detalle' in locals():
+                        df_nx_detalle.to_excel(writer, index=False, sheet_name="Detalle")
                 st.download_button(
                     label="📥 Descargar Reporte (Excel)",
                     data=buf.getvalue(),
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )",
+                    data=buf.getvalue(),
+                    file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+            else:
+                st.info("No hay datos para descargar aún. Genera el reporte primero.")
+
+
