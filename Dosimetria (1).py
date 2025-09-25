@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import io, re, unicodedata
 from io import BytesIO
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
@@ -125,9 +125,10 @@ def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
         out["NOMBRE"] = ""
     out["CLIENTE"]           = df[c_cli].astype(str).str.strip() if c_cli else ""
     out["CÓDIGO_DOSÍMETRO"]  = (df[c_cod].astype(str).str.strip().str.upper() if c_cod else "")
-    out["PERIODO DE LECTURA"]= (df[c_per].astype(str).str.strip().str.upper() if c_per else "")
+    out["PERIODO DE LECTURA"] = (df[c_per].astype(str).str.strip().str.upper() if c_per else "")
     out["TIPO DE DOSÍMETRO"] = df[c_tipo].astype(str).str.strip() if c_tipo else ""
     out["ETIQUETA"]          = df[c_etq].astype(str).str.strip() if c_etq else ""
+
     # marca de control
     def _is_ctrl(r):
         for k in ["ETIQUETA","NOMBRE","CÉDULA","CÓDIGO DE USUARIO"]:
@@ -191,7 +192,7 @@ def construir_registros(df_lista: pd.DataFrame,
 
     for _, r in df_l.iterrows():
         cod = str(r["CÓDIGO_DOSÍMETRO"]).strip().upper()
-        if not cod or cod == "NAN": 
+        if not cod or cod == "NAN":
             continue
         if cod not in idx.index:
             continue
@@ -225,6 +226,109 @@ def construir_registros(df_lista: pd.DataFrame,
     if not df_final.empty:
         df_final = df_final.sort_values(["_IS_CONTROL","NOMBRE","CÉDULA"], ascending=[False, True, True]).reset_index(drop=True)
     return df_final
+
+# ===================== Resta de CONTROL + Formato PM/3 dec =====================
+def aplicar_resta_control_y_formato(df_final: pd.DataFrame,
+                                    umbral_pm: float = 0.005):
+    """
+    Resta el valor del CONTROL a cada fila de persona usando claves:
+    (PERIODO DE LECTURA, CLIENTE, TIPO DE DOSÍMETRO) → (PERIODO, CLIENTE) → (PERIODO).
+    Tras la resta, valores < umbral_pm => 'PM'. Devuelve:
+      - df_vista: DF listo para mostrar/subir (Hp formateados a 'PM' o 3 decimales)
+      - df_num:   DF con columnas numéricas corregidas para agregaciones
+    """
+    if df_final is None or df_final.empty:
+        return df_final, df_final
+
+    df = df_final.copy()
+
+    # Asegurar claves
+    for c in ["PERIODO DE LECTURA", "CLIENTE", "TIPO DE DOSÍMETRO", "NOMBRE"]:
+        if c not in df.columns:
+            df[c] = ""
+
+    # Asegurar Hp numéricos
+    for h in ["Hp (10)", "Hp (0.07)", "Hp (3)"]:
+        if h not in df.columns:
+            df[h] = 0.0
+        df[h] = pd.to_numeric(df[h], errors="coerce").fillna(0.0)
+
+    # Separar control y personas
+    is_control = df["NOMBRE"].astype(str).str.strip().str.upper().eq("CONTROL")
+    df_ctrl = df[is_control].copy()
+    df_per  = df[~is_control].copy()
+
+    # Construir tablas de control en varios niveles de especificidad
+    def agg_ctrl(g):
+        return g.agg({"Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"})
+
+    ctrl_lvl3 = df_ctrl.groupby(["PERIODO DE LECTURA","CLIENTE","TIPO DE DOSÍMETRO"], as_index=False).apply(agg_ctrl)
+    ctrl_lvl2 = df_ctrl.groupby(["PERIODO DE LECTURA","CLIENTE"], as_index=False).apply(agg_ctrl)
+    ctrl_lvl1 = df_ctrl.groupby(["PERIODO DE LECTURA"], as_index=False).apply(agg_ctrl)
+
+    # Merge progresivo: primero nivel 3, después 2, luego 1 (completando faltantes)
+    out = df_per.copy()
+    for lvl, keys in [
+        (ctrl_lvl3, ["PERIODO DE LECTURA","CLIENTE","TIPO DE DOSÍMETRO"]),
+        (ctrl_lvl2, ["PERIODO DE LECTURA","CLIENTE"]),
+        (ctrl_lvl1, ["PERIODO DE LECTURA"]),
+    ]:
+        if isinstance(lvl, pd.DataFrame) and not lvl.empty:
+            out = out.merge(
+                lvl.rename(columns={
+                    "Hp (10)":"Hp10_CTRL",
+                    "Hp (0.07)":"Hp007_CTRL",
+                    "Hp (3)":"Hp3_CTRL"
+                }),
+                on=keys, how="left"
+            )
+
+    # Tomar el primer control disponible (prioridad por columnas generadas por merges)
+    def first_nonnull(row, cols):
+        for c in cols:
+            v = row.get(c)
+            if pd.notna(v):
+                return v
+        return 0.0
+
+    # Consolidar columnas de control (maneja posibles sufijos de merge)
+    out["Hp10_CTRL"]  = out.filter(regex=r"^Hp10_CTRL").apply(lambda r: first_nonnull(r, r.index), axis=1) if not out.filter(regex=r"^Hp10_CTRL").empty else 0.0
+    out["Hp007_CTRL"] = out.filter(regex=r"^Hp007_CTRL").apply(lambda r: first_nonnull(r, r.index), axis=1) if not out.filter(regex=r"^Hp007_CTRL").empty else 0.0
+    out["Hp3_CTRL"]   = out.filter(regex=r"^Hp3_CTRL").apply(lambda r: first_nonnull(r, r.index), axis=1) if not out.filter(regex=r"^Hp3_CTRL").empty else 0.0
+
+    # Calcular valores corregidos (no negativos)
+    out["_Hp10_NUM"]  = (out["Hp (10)"]   - out["Hp10_CTRL"]).clip(lower=0.0)
+    out["_Hp007_NUM"] = (out["Hp (0.07)"] - out["Hp007_CTRL"]).clip(lower=0.0)
+    out["_Hp3_NUM"]   = (out["Hp (3)"]    - out["Hp3_CTRL"]).clip(lower=0.0)
+
+    # Formateo visible: PM si < umbral, si no a 3 decimales
+    def fmt(v):
+        return "PM" if float(v) < umbral_pm else f"{float(v):.3f}"
+
+    out_view = out.copy()
+    out_view["Hp (10)"]   = out_view["_Hp10_NUM"].map(fmt)
+    out_view["Hp (0.07)"] = out_view["_Hp007_NUM"].map(fmt)
+    out_view["Hp (3)"]    = out_view["_Hp3_NUM"].map(fmt)
+
+    # CONTROL: solo formateo a 3 decimales (no se restan)
+    df_ctrl_view = df_ctrl.copy()
+    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+        df_ctrl_view[h] = df_ctrl_view[h].map(lambda x: f"{float(x):.3f}")
+
+    # Unir de nuevo (CONTROL arriba)
+    df_vista = pd.concat([df_ctrl_view, out_view], ignore_index=True)
+
+    # Orden: CONTROL primero
+    df_vista = df_vista.sort_values(
+        by=["NOMBRE","CÉDULA"], ascending=[True, True]
+    ).sort_values(
+        by="NOMBRE", key=lambda s: s.str.upper().ne("CONTROL")
+    ).reset_index(drop=True)
+
+    # DF numérico para agregaciones (solo personas), conservando metadatos
+    df_num = out[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
+
+    return df_vista, df_num
 
 # ===================== TABS =====================
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
@@ -266,18 +370,26 @@ with tab1:
         elif "dosimeter" not in df_dosis.columns:
             st.error("El archivo de dosis debe incluir la columna 'dosimeter'.")
         else:
-            df_final = construir_registros(df_lista, df_dosis, periodos_sel)
-            if df_final.empty:
+            df_final_raw = construir_registros(df_lista, df_dosis, periodos_sel)
+            if df_final_raw.empty:
                 with st.expander("Debug de coincidencias (no se encontraron)"):
                     st.write({
-                        "dosimeter únicos en dosis": sorted(df_dosis["dosimeter"].dropna().unique().tolist()),
-                        "CÓDIGO_DOSÍMETRO únicos en LISTA (según filtro)": sorted(df_lista["CÓDIGO_DOSÍMETRO"].dropna().unique().tolist())
+                        "dosimeter únicos en dosis": sorted(df_dosis["dosimeter"].dropna().unique().tolist()) if "dosimeter" in df_dosis.columns else [],
+                        "CÓDIGO_DOSÍMETRO únicos en LISTA (según filtro)": sorted(df_lista["CÓDIGO_DOSÍMETRO"].dropna().unique().tolist()) if "CÓDIGO_DOSÍMETRO" in df_lista.columns else []
                     })
                 st.warning("⚠️ No hay coincidencias **CÓDIGO_DOSÍMETRO** ↔ **dosimeter** (revisa periodos/códigos).")
             else:
-                st.session_state.df_final = df_final.drop(columns=["_IS_CONTROL"], errors="ignore")
-                st.success(f"¡Listo! Registros generados: {len(st.session_state.df_final)}")
-                st.dataframe(st.session_state.df_final, use_container_width=True)
+                # Aplica resta de CONTROL y formato (PM / 3 decimales)
+                df_vista, df_num_corr = aplicar_resta_control_y_formato(df_final_raw, umbral_pm=0.005)
+
+                # Guardar en sesión:
+                # - df_final_vista: para mostrar/subir (con 'PM' ya formateado)
+                # - df_final_num  : para reportes (numérico corregido)
+                st.session_state.df_final_vista = df_vista.drop(columns=["_IS_CONTROL"], errors="ignore")
+                st.session_state.df_final_num   = df_num_corr
+
+                st.success(f"¡Listo! Registros generados (corregidos por CONTROL): {len(st.session_state.df_final_vista)}")
+                st.dataframe(st.session_state.df_final_vista, use_container_width=True)
 
     st.markdown("---")
     st.subheader("3) Subir TODO a Ninox (tabla **BASE DE DATOS**)")
@@ -297,12 +409,12 @@ with tab1:
         return str(v)
 
     if st.button("⬆️ Subir a Ninox (BASE DE DATOS)"):
-        df_final = st.session_state.get("df_final")
-        if df_final is None or df_final.empty:
+        df_para_subir = st.session_state.get("df_final_vista")  # ← usa la vista con PM/3 decimales
+        if df_para_subir is None or df_para_subir.empty:
             st.error("No hay datos procesados. Pulsa 'Procesar y Previsualizar' primero.")
         else:
             rows = []
-            for _, row in df_final.iterrows():
+            for _, row in df_para_subir.iterrows():
                 fields = {
                     "PERIODO DE LECTURA": _to_str(row.get("PERIODO DE LECTURA","")),
                     "CLIENTE": _to_str(row.get("CLIENTE","")),
@@ -310,8 +422,9 @@ with tab1:
                     "CÓDIGO DE USUARIO": _to_str(row.get("CÓDIGO DE USUARIO","")),
                     "NOMBRE": _to_str(row.get("NOMBRE","")),
                     "CÉDULA": _to_str(row.get("CÉDULA","")),
-                    "FECHA DE LECTURA": _to_str(row.get("FECHA DE LECTURA","")),  # ← timestamp formateado
+                    "FECHA DE LECTURA": _to_str(row.get("FECHA DE LECTURA","")),
                     "TIPO DE DOSÍMETRO": _to_str(row.get("TIPO DE DOSÍMETRO","")),
+                    # Mantén el comportamiento: si "PM" y checkbox activo, sube texto "PM"
                     "Hp (10)": _hp_value(row.get("Hp (10)"), subir_pm_como_texto),
                     "Hp (0.07)": _hp_value(row.get("Hp (0.07)"), subir_pm_como_texto),
                     "Hp (3)": _hp_value(row.get("Hp (3)"), subir_pm_como_texto),
@@ -329,42 +442,41 @@ with tab1:
 # ------------------ TAB 2 ------------------
 with tab2:
     st.subheader("📊 Reporte Final: suma por **CÓDIGO DE USUARIO** (personas) y **CONTROL** por **CÓDIGO DE DOSÍMETRO**")
-    df_rep = st.session_state.get("df_final")
+    df_vista = st.session_state.get("df_final_vista")
+    df_num   = st.session_state.get("df_final_num")  # numérico corregido para agregaciones
 
-    if df_rep is None or df_rep.empty:
+    if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
     else:
         # Normalizaciones defensivas
         for col in ["CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE"]:
-            if col in df_rep.columns:
-                df_rep[col] = df_rep[col].fillna("").astype(str).str.strip()
-        for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-            if h in df_rep.columns:
-                df_rep[h] = pd.to_numeric(df_rep[h], errors="coerce")
+            if col in df_vista.columns:
+                df_vista[col] = df_vista[col].fillna("").astype(str).str.strip()
 
-        # Personas: agrupar por CÓDIGO DE USUARIO (excluye CONTROL)
-        personas = df_rep[df_rep["NOMBRE"].str.strip().str.upper() != "CONTROL"].copy()
+        # Personas: agrupar por CÓDIGO DE USUARIO (excluye CONTROL) usando numérico corregido
+        personas = df_num[df_num["NOMBRE"].str.strip().str.upper() != "CONTROL"].copy()
         if not personas.empty:
             per_group = personas.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
                 "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
-                "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
+                "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
             }).rename(columns={
-                "Hp (10)":"Hp10_SUM","Hp (0.07)":"Hp007_SUM","Hp (3)":"Hp3_SUM"
+                "_Hp10_NUM":"Hp10_SUM","_Hp007_NUM":"Hp007_SUM","_Hp3_NUM":"Hp3_SUM"
             })
-            st.markdown("### Personas — Suma por **CÓDIGO DE USUARIO**")
+            st.markdown("### Personas — Suma por **CÓDIGO DE USUARIO** (corregido por CONTROL)")
             st.dataframe(per_group, use_container_width=True)
         else:
             st.info("No hay filas de personas (todas serían CONTROL).")
 
-        # Control: agrupar por CÓDIGO DE DOSÍMETRO
-        control = df_rep[df_rep["NOMBRE"].str.strip().str.upper() == "CONTROL"].copy()
-        if not control.empty:
-            ctrl_group = control.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
+        # CONTROL: sumar valores originales de control (de la vista)
+        control_vista = df_vista[df_vista["NOMBRE"].str.strip().str.upper() == "CONTROL"].copy()
+        if not control_vista.empty:
+            for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+                control_vista[h] = pd.to_numeric(control_vista[h], errors="coerce").fillna(0.0)
+            ctrl_group = control_vista.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
                 "CLIENTE":"last","Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
-            }).rename(columns={
-                "Hp (10)":"Hp10_SUM","Hp (0.07)":"Hp007_SUM","Hp (3)":"Hp3_SUM"
-            })
+            }).rename(columns={"Hp (10)":"Hp10_SUM","Hp (0.07)":"Hp007_SUM","Hp (3)":"Hp3_SUM"})
             st.markdown("### CONTROL — Suma por **CÓDIGO DE DOSÍMETRO**")
             st.dataframe(ctrl_group, use_container_width=True)
         else:
             st.info("No hay filas de CONTROL en el cruce actual.")
+
