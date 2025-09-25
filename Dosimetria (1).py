@@ -13,8 +13,7 @@ API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"
 TEAM_ID     = "YrsYfTegptdZcHJEj"
 DATABASE_ID = "ow1geqnkz00e"
 BASE_URL    = "https://api.ninox.com/v1"
-
-TABLE_WRITE_NAME = "BASE DE DATOS"  # escritura en Ninox
+TABLE_WRITE_NAME = "BASE DE DATOS"
 
 # ===================== UI =====================
 st.set_page_config(page_title="Microsievert — Dosimetría", page_icon="🧪", layout="wide")
@@ -106,7 +105,6 @@ def ninox_list_tables(team_id: str, db_id: str):
     return r.json()
 
 def resolve_table_id(table_hint: str) -> str:
-    """Acepta ID corto o NOMBRE legible y devuelve ID real."""
     hint = (table_hint or "").strip()
     if hint and " " not in hint and len(hint) <= 8:
         return hint
@@ -621,10 +619,17 @@ with tab2:
             else:
                 # ---- DE POR VIDA (histórico completo) ----
                 df_life = df_nx_all.copy()
+                # normalizar claves y Hp a num
+                for c in ["CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","CLIENTE","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO"]:
+                    if c in df_life.columns:
+                        df_life[c] = df_life[c].astype(str).str.strip()
+                if "NOMBRE" in df_life.columns:
+                    df_life["NOMBRE"] = df_life["NOMBRE"].str.upper().fillna("")
                 for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
                     if h in df_life.columns: df_life[h] = df_life[h].apply(hp_to_num)
-                personas_life = df_life[df_life["NOMBRE"].astype(str).str.upper().ne("CONTROL")].copy()
-                control_life  = df_life[df_life["NOMBRE"].astype(str).str.upper().eq("CONTROL")].copy()
+
+                personas_life = df_life[df_life["NOMBRE"] != "CONTROL"].copy()
+                control_life  = df_life[df_life["NOMBRE"] == "CONTROL"].copy()
 
                 per_life = personas_life.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
                     "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
@@ -655,6 +660,12 @@ with tab2:
                 )
 
                 df_nx = df_nx_all.copy()
+                # normalizar claves (muy importante para sumar 188 + 188)
+                for c in ["CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","CLIENTE","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO"]:
+                    if c in df_nx.columns:
+                        df_nx[c] = df_nx[c].astype(str).str.strip()
+                if "NOMBRE" in df_nx.columns:
+                    df_nx["NOMBRE"] = df_nx["NOMBRE"].str.upper().fillna("")
 
                 # Selectores
                 per_opts = sorted(df_nx["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist()) if "PERIODO DE LECTURA" in df_nx.columns else []
@@ -684,16 +695,18 @@ with tab2:
                 if cli_sel:
                     df_nx = df_nx[df_nx["CLIENTE"].isin(cli_sel)]
 
+                # Asegurar Hp numéricas (PM->0) para sumar
                 for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
                     if h in df_nx.columns: df_nx[h] = df_nx[h].apply(hp_to_num)
 
                 # Personas/Control para ANUAL
-                personas = df_nx[df_nx["NOMBRE"].astype(str).str.upper().ne("CONTROL")].copy()
-                control   = df_nx[df_nx["NOMBRE"].astype(str).str.upper().eq("CONTROL")].copy()
+                personas = df_nx[df_nx["NOMBRE"] != "CONTROL"].copy()
+                control   = df_nx[df_nx["NOMBRE"] == "CONTROL"].copy()
 
-                per_view = pd.DataFrame(); ctrl_view = pd.DataFrame()
-
+                # --- Personas (ANUAL + DE POR VIDA) ---
+                per_view = pd.DataFrame()
                 if not personas.empty:
+                    # (AQUÍ ESTÁ LA CLAVE) — ya normalizado CÓDIGO DE USUARIO como string
                     per_anual = personas.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
                         "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
                         "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
@@ -720,6 +733,8 @@ with tab2:
                 else:
                     st.info("No hay filas de personas para el reporte (Ninox).")
 
+                # --- Control (ANUAL + DE POR VIDA) ---
+                ctrl_view = pd.DataFrame()
                 if not control.empty:
                     ctrl_anual = control.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
                         "CLIENTE":"last","Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
@@ -762,7 +777,8 @@ with tab2:
                             df_nx_detalle.to_excel(writer, index=False, sheet_name="Detalle")
                         if not ctrl_annual_period.empty:
                             ctrl_annual_period.to_excel(writer, index=False, sheet_name="Control por Periodo (ANUAL)")
-                        if not ctrl_life_period.empty:
+                        # vida por periodo acumulado
+                        if not control_life.empty:
                             ctrl_life_period.to_excel(writer, index=False, sheet_name="Control por Periodo (VIDA)")
                     st.download_button(
                         label="📥 Descargar Reporte (Excel)",
@@ -771,7 +787,6 @@ with tab2:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
 
-                # Mostrar tablas de control por periodo
                 with st.expander("👀 Ver CONTROL por periodo (ANUAL)"):
                     if not ctrl_annual_period.empty:
                         st.dataframe(ctrl_annual_period, use_container_width=True)
@@ -790,8 +805,17 @@ with tab2:
         if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
             st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
         else:
+            # personas = df_num (numérico y ya corregido por control)
             personas = df_num[df_num["NOMBRE"].str.strip().str.upper() != "CONTROL"].copy()
+            # normalizar claves en sesión (CLAVE PARA SUMAR 188 + 188)
+            for c in ["CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","CLIENTE","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO"]:
+                if c in personas.columns:
+                    personas[c] = personas[c].astype(str).str.strip()
+
             control_vista = df_vista[df_vista["NOMBRE"].str.strip().str.upper() == "CONTROL"].copy()
+            for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+                if h in control_vista.columns:
+                    control_vista[h] = pd.to_numeric(control_vista[h], errors="coerce").fillna(0.0)
 
             per_view = pd.DataFrame(); ctrl_view = pd.DataFrame()
 
@@ -821,8 +845,6 @@ with tab2:
                 st.info("No hay filas de personas en la sesión.")
 
             if not control_vista.empty:
-                for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-                    control_vista[h] = pd.to_numeric(control_vista[h], errors="coerce").fillna(0.0)
                 ctrl_anual = control_vista.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
                     "CLIENTE":"last","Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
                 }).rename(columns={"Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"})
