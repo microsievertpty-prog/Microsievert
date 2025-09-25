@@ -485,3 +485,4 @@ with tab2:
             st.info("No hay filas de CONTROL en el cruce actual.")
 
 
+
