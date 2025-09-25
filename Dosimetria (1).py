@@ -331,7 +331,7 @@ def aplicar_resta_control_y_formato(df_final: pd.DataFrame, umbral_pm: float = 0
     # Formateo a vista
     def fmt(v):
         v = float(v)
-        return "PM" if v < umbral_pm else f"{v:.3f}"
+        return "PM" if v < umbral_pm else f"{v:.2f}"
 
     out_view = out.copy()
     out_view["Hp (10)"]   = out_view["_Hp10_NUM"].map(fmt)
@@ -341,7 +341,7 @@ def aplicar_resta_control_y_formato(df_final: pd.DataFrame, umbral_pm: float = 0
     # Control: solo formateo 3 dec
     df_ctrl_view = df_ctrl.copy()
     for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-        df_ctrl_view[h] = df_ctrl_view[h].map(lambda x: f"{float(x):.3f}")
+        df_ctrl_view[h] = df_ctrl_view[h].map(lambda x: f"{float(x):.2f}")
 
     df_vista = pd.concat([df_ctrl_view, out_view], ignore_index=True)
     df_vista = df_vista.sort_values(by=["NOMBRE","CÉDULA"], ascending=[True, True]).sort_values(by="NOMBRE", key=lambda s: s.str.upper().ne("CONTROL")).reset_index(drop=True)
@@ -405,12 +405,20 @@ with tab1:
     st.subheader("3) Subir TODO a Ninox (tabla **BASE DE DATOS**)")
 
     def _hp_value(v, as_text_pm=True):
+        # Devuelve PM (si aplica) o valor con 2 decimales si as_text_pm=True,
+        # o número float si as_text_pm=False
         if isinstance(v, str) and v.strip().upper() == "PM":
             return "PM" if as_text_pm else None
+        # Si viene como string numérico, convertir
         try:
-            return float(v)
+            num = float(v)
         except Exception:
+            # deja pasar cualquiera otra cosa tal cual
             return v if v is not None else None
+        if as_text_pm:
+            return f"{num:.2f}"
+        else:
+            return num
 
     def _to_str(v):
         if pd.isna(v): return ""
@@ -483,6 +491,3 @@ with tab2:
             st.dataframe(ctrl_group, use_container_width=True)
         else:
             st.info("No hay filas de CONTROL en el cruce actual.")
-
-
-
