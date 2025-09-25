@@ -567,7 +567,7 @@ with tab2:
 
                     per_view = per_anual.copy()
                     for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
-                        per_view[c] = per_view[c].astype(float).map(lambda v: f"{v:.2f}")
+                        per_view[c] = per_view[c].map(pmfmt)
 
                     st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL y DE POR VIDA)")
                     st.dataframe(per_view, use_container_width=True)
@@ -588,7 +588,7 @@ with tab2:
 
                     ctrl_view = ctrl_anual.copy()
                     for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
-                        ctrl_view[c] = ctrl_view[c].astype(float).map(lambda v: f"{v:.2f}")
+                        ctrl_view[c] = ctrl_view[c].map(pmfmt)
 
                     st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL y DE POR VIDA)")
                     st.dataframe(ctrl_view, use_container_width=True)
@@ -602,91 +602,10 @@ with tab2:
                     # Guardar copia DETALLE preservando valores originales (incluye PM)
                     df_nx_detalle = df_nx.copy()
                     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                        if not personas.empty:
-                            to_save = per_anual.copy()
-                            for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
-                                to_save[c] = to_save[c].astype(float).round(2)
-                            to_save.to_excel(writer, index=False, sheet_name="Personas")
-                        if not control.empty:
-                            cs = ctrl_anual.copy()
-                            for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
-                                cs[c] = cs[c].astype(float).round(2)
-                            cs.to_excel(writer, index=False, sheet_name="Control")
-                        # Hoja Detalle con los registros base (preserva PM)
-                        if not df_nx_detalle.empty:
-                            df_nx_detalle.to_excel(writer, index=False, sheet_name="Detalle")
-                    st.download_button(
-                        label="📥 Descargar Reporte (Excel)",
-                        data=buf.getvalue(),
-                        file_name=f"Reporte_Dosimetria_Ninox_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )",
-                        data=buf.getvalue(),
-                        file_name=f"Reporte_Dosimetria_Ninox_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-        except Exception as e:
-            st.error(f"Error leyendo Ninox: {e}")
-
-    # ------------------- Fuente: sesión (lo ya procesado) -------------------
-    else:
-        if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
-            st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
-        else:
-            # Personas (excluye CONTROL)
-            personas = df_num[df_num["NOMBRE"].str.strip().str.upper() != "CONTROL"].copy()
-            if not personas.empty:
-                per_anual = personas.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
-                    "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
-                    "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
-                }).rename(columns={
-                    "_Hp10_NUM":"Hp (10) ANUAL","_Hp007_NUM":"Hp (0.07) ANUAL","_Hp3_NUM":"Hp (3) ANUAL"
-                })
-                per_anual["Hp (10) DE POR VIDA"]  = per_anual["Hp (10) ANUAL"]
-                per_anual["Hp (0.07) DE POR VIDA"] = per_anual["Hp (0.07) ANUAL"]
-                per_anual["Hp (3) DE POR VIDA"]    = per_anual["Hp (3) ANUAL"]
-                per_view = per_anual.copy()
-                for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
-                    per_view[c] = per_view[c].astype(float).map(lambda v: f"{v:.2f}")
-                st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL y DE POR VIDA)")
-                st.dataframe(per_view, use_container_width=True)
-            else:
-                st.info("No hay filas de personas para el reporte.")
-
-            control_vista = df_vista[df_vista["NOMBRE"].str.strip().str.upper() == "CONTROL"].copy()
-            if not control_vista.empty:
-                for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-                    control_vista[h] = pd.to_numeric(control_vista[h], errors="coerce").fillna(0.0)
-                ctrl_anual = control_vista.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
-                    "CLIENTE":"last","Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
-                }).rename(columns={"Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"})
-                ctrl_anual["Hp (10) DE POR VIDA"]  = ctrl_anual["Hp (10) ANUAL"]
-                ctrl_anual["Hp (0.07) DE POR VIDA"] = ctrl_anual["Hp (0.07) ANUAL"]
-                ctrl_anual["Hp (3) DE POR VIDA"]    = ctrl_anual["Hp (3) ANUAL"]
-                ctrl_view = ctrl_anual.copy()
-                for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
-                    ctrl_view[c] = ctrl_view[c].astype(float).map(lambda v: f"{v:.2f}")
-                st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL y DE POR VIDA)")
-                st.dataframe(ctrl_view, use_container_width=True)
-            else:
-                st.info("No hay filas de CONTROL en el cruce actual.")
-
-            # Descarga Excel (desde sesión)
-            if (not personas.empty) or (not control_vista.empty):
-                from io import BytesIO
-                buf = BytesIO()
-                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                    if not personas.empty:
-                        to_save = per_anual.copy()
-                        for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
-                            to_save[c] = to_save[c].astype(float).round(2)
-                        to_save.to_excel(writer, index=False, sheet_name="Personas")
-                    if not control_vista.empty:
-                        cs = ctrl_anual.copy()
-                        for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
-                            cs[c] = cs[c].astype(float).round(2)
-                        cs.to_excel(writer, index=False, sheet_name="Control")
-                    # Hoja Detalle con los registros tal como se muestran (incluye PM y 0.00)
+                    if not per_view.empty:
+                        per_view.to_excel(writer, index=False, sheet_name="Personas")
+                    if not ctrl_view.empty:
+                        ctrl_view.to_excel(writer, index=False, sheet_name="Control")
                     det = st.session_state.get("df_final_vista")
                     if det is not None and not det.empty:
                         det.to_excel(writer, index=False, sheet_name="Detalle")
@@ -695,10 +614,4 @@ with tab2:
                     data=buf.getvalue(),
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )",
-                    data=buf.getvalue(),
-                    file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-            else:
-                st.info("No hay datos para descargar aún. Genera el reporte primero.")
