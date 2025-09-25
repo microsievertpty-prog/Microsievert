@@ -527,7 +527,7 @@ with tab2:
         if (per_anual is not None and not per_anual.empty) or (ctrl_anual is not None and not ctrl_anual.empty):
             from io import BytesIO
             buf = BytesIO()
-            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                 if per_anual is not None and not per_anual.empty:
                     per_to_save = per_anual.copy()
                     # redondeo a 2 decimales (numérico) para el archivo
@@ -535,24 +535,28 @@ with tab2:
                         per_to_save[c] = per_to_save[c].astype(float).round(2)
                     per_to_save.to_excel(writer, index=False, sheet_name="Personas")
                     # formato numérico en Excel
-                    workbook  = writer.book
-                    worksheet = writer.sheets["Personas"]
-                    num_fmt = workbook.add_format({"num_format": "0.00"})
-                    # aplicar a columnas numéricas (E..J aprox, ajusta por seguridad)
-                    for col_idx, col_name in enumerate(per_to_save.columns):
-                        if col_name.startswith("Hp "):
-                            worksheet.set_column(col_idx, col_idx, 12, num_fmt)
+                    wb = writer.book
+ws = writer.sheets["Personas"]
+# aplicar formato 0.00 a columnas Hp*
+from openpyxl.styles import numbers
+for idx, name in enumerate(per_to_save.columns, start=1):
+    if name.startswith("Hp "):
+        for row in ws.iter_rows(min_row=2, min_col=idx, max_col=idx, max_row=ws.max_row):
+            for cell in row:
+                cell.number_format = "0.00"
                 if ctrl_anual is not None and not ctrl_anual.empty:
                     ctrl_to_save = ctrl_anual.copy()
                     for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         ctrl_to_save[c] = ctrl_to_save[c].astype(float).round(2)
                     ctrl_to_save.to_excel(writer, index=False, sheet_name="Control")
-                    workbook  = writer.book
-                    worksheet = writer.sheets["Control"]
-                    num_fmt = workbook.add_format({"num_format": "0.00"})
-                    for col_idx, col_name in enumerate(ctrl_to_save.columns):
-                        if col_name.startswith("Hp "):
-                            worksheet.set_column(col_idx, col_idx, 12, num_fmt)
+                    wb = writer.book
+ws = writer.sheets["Control"]
+from openpyxl.styles import numbers
+for idx, name in enumerate(ctrl_to_save.columns, start=1):
+    if name.startswith("Hp "):
+        for row in ws.iter_rows(min_row=2, min_col=idx, max_col=idx, max_row=ws.max_row):
+            for cell in row:
+                cell.number_format = "0.00"
             st.download_button(
                 label="📥 Descargar Reporte (Excel)",
                 data=buf.getvalue(),
@@ -561,4 +565,3 @@ with tab2:
             )
         else:
             st.info("No hay datos para descargar aún. Genera el reporte primero.")
-
