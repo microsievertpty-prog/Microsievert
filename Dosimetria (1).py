@@ -20,75 +20,9 @@ TABLE_WRITE_NAME = "BASE DE DATOS"  # escritura en Ninox
 st.set_page_config(page_title="Microsievert — Dosimetría", page_icon="🧪", layout="wide")
 st.title("🧪 Carga y Cruce de Dosis → Ninox (**BASE DE DATOS**)")
 
-# ===================== Helpers =====================
-def ninox_headers():
-    return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
-
-@st.cache_data(ttl=300, show_spinner=False)
-def ninox_list_tables(team_id: str, db_id: str):
-    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
-    r = requests.get(url, headers=ninox_headers(), timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-def resolve_table_id(table_hint: str) -> str:
-    """Acepta ID corto o NOMBRE legible y devuelve ID real."""
-    hint = (table_hint or "").strip()
-    if hint and " " not in hint and len(hint) <= 8:
-        return hint
-    for t in ninox_list_tables(TEAM_ID, DATABASE_ID):
-        if str(t.get("name", "")).strip().lower() == hint.lower():
-            return str(t.get("id", "")).strip()
-    return hint
-
-def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 300) -> Dict[str, Any]:
-    table_id = resolve_table_id(table_hint)
-    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
-    n, inserted = len(rows), 0
-    if n == 0:
-        return {"ok": True, "inserted": 0}
-    for i in range(0, n, batch_size):
-        chunk = rows[i:i+batch_size]
-        r = requests.post(url, headers=ninox_headers(), json=chunk, timeout=60)
-        if r.status_code != 200:
-            return {"ok": False, "inserted": inserted, "error": f"{r.status_code} {r.text}"}
-        inserted += len(chunk)
-    return {"ok": True, "inserted": inserted}
-
-# ---------- Lectura de registros de Ninox (para reportes) ----------
-@st.cache_data(ttl=300, show_spinner=False)
-def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
-    table_id = resolve_table_id(table_hint)
-    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
-    out, skip = [], 0
-    for _ in range(max_pages):
-        params = {"limit": limit, "skip": skip}
-        r = requests.get(url, headers=ninox_headers(), params=params, timeout=60)
-        r.raise_for_status()
-        batch = r.json() or []
-        if not batch:
-            break
-        out.extend(batch)
-        if len(batch) < limit:
-            break
-        skip += limit
-    return out
-
-def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
-    if not records:
-        return pd.DataFrame()
-    rows = []
-    for rec in records:
-        fields = rec.get("fields", {}) or {}
-        rows.append({k: fields.get(k) for k in [
-            "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO",
-            "NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
-            "Hp (10)","Hp (0.07)","Hp (3)"
-        ]})
-    df = pd.DataFrame(rows)
-    if "PERIODO DE LECTURA" in df.columns:
-        df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
-    return df
+# ===================== Helpers generales =====================
+def strip_accents(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 # ---------- Normalización de PERIODO ----------
 MES_MAP = {
@@ -134,9 +68,6 @@ def normalizar_periodo(valor: str) -> str:
 
     return s
 
-def strip_accents(s: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
-
 def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     def _n(x: str) -> str:
         x = strip_accents(str(x)).strip()
@@ -162,6 +93,75 @@ def parse_csv_robust(upload) -> pd.DataFrame:
         return pd.read_excel(BytesIO(raw))
     except Exception:
         raise
+
+# ---------- Ninox helpers ----------
+def ninox_headers():
+    return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
+
+@st.cache_data(ttl=300, show_spinner=False)
+def ninox_list_tables(team_id: str, db_id: str):
+    url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
+    r = requests.get(url, headers=ninox_headers(), timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def resolve_table_id(table_hint: str) -> str:
+    """Acepta ID corto o NOMBRE legible y devuelve ID real."""
+    hint = (table_hint or "").strip()
+    if hint and " " not in hint and len(hint) <= 8:
+        return hint
+    for t in ninox_list_tables(TEAM_ID, DATABASE_ID):
+        if str(t.get("name", "")).strip().lower() == hint.lower():
+            return str(t.get("id", "")).strip()
+    return hint
+
+def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 300) -> Dict[str, Any]:
+    table_id = resolve_table_id(table_hint)
+    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
+    n, inserted = len(rows), 0
+    if n == 0:
+        return {"ok": True, "inserted": 0}
+    for i in range(0, n, batch_size):
+        chunk = rows[i:i+batch_size]
+        r = requests.post(url, headers=ninox_headers(), json=chunk, timeout=60)
+        if r.status_code != 200:
+            return {"ok": False, "inserted": inserted, "error": f"{r.status_code} {r.text}"}
+        inserted += len(chunk)
+    return {"ok": True, "inserted": inserted}
+
+@st.cache_data(ttl=300, show_spinner=False)
+def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
+    table_id = resolve_table_id(table_hint)
+    url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
+    out, skip = [], 0
+    for _ in range(max_pages):
+        params = {"limit": limit, "skip": skip}
+        r = requests.get(url, headers=ninox_headers(), params=params, timeout=60)
+        r.raise_for_status()
+        batch = r.json() or []
+        if not batch:
+            break
+        out.extend(batch)
+        if len(batch) < limit:
+            break
+        skip += limit
+    return out
+
+def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame()
+    rows = []
+    for rec in records:
+        fields = rec.get("fields", {}) or {}
+        rows.append({k: fields.get(k) for k in [
+            "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO",
+            "NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
+            "Hp (10)","Hp (0.07)","Hp (3)"
+        ]})
+    df = pd.DataFrame(rows)
+    if "PERIODO DE LECTURA" in df.columns:
+        df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
+    return df
 
 # ===================== Lectores =====================
 def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
@@ -251,7 +251,7 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     return df
 
-# ===================== Construcción de registros (match + periodo) =====================
+# ===================== Cruce (match + periodo) =====================
 def construir_registros(df_lista: pd.DataFrame,
                         df_dosis: pd.DataFrame,
                         periodos: List[str]) -> pd.DataFrame:
@@ -311,7 +311,7 @@ def construir_registros(df_lista: pd.DataFrame,
 # ===================== Resta de CONTROL + Formato =====================
 def aplicar_resta_control_y_formato(df_final: pd.DataFrame, umbral_pm: float = 0.005):
     """Devuelve:
-       - df_vista: Hp en texto PM/0.00 (ya restado control)
+       - df_vista: Hp texto PM/0.00 (ya restado control)
        - df_num  : Hp numéricas corregidas (_Hp10_NUM/_Hp007_NUM/_Hp3_NUM)
     """
     if df_final is None or df_final.empty:
@@ -330,7 +330,6 @@ def aplicar_resta_control_y_formato(df_final: pd.DataFrame, umbral_pm: float = 0
     df_ctrl = df[is_control].copy()
     df_per  = df[~is_control].copy()
 
-    # Sin control -> solo formateo
     if df_ctrl.empty:
         def fmt_only(v): return "PM" if float(v) < umbral_pm else f"{float(v):.2f}"
         df_vista = df_per.copy()
@@ -394,7 +393,7 @@ def aplicar_resta_control_y_formato(df_final: pd.DataFrame, umbral_pm: float = 0
                   "TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
     return df_vista, df_num
 
-# ---------- Reporte: helpers de orden y acumulados ----------
+# ---------- Reporte: helpers ----------
 def pmfmt(v, thr: float = 0.005) -> str:
     try:
         f = float(v)
@@ -429,11 +428,8 @@ def ordenar_columnas_reporte(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     resto = [c for c in df.columns if c not in existentes]
     return df[existentes + resto]
 
-# ---- Fechas/orden para "AGOSTO 2025" ----
-MES_A_NUM = {
-    "ENERO":1,"FEBRERO":2,"MARZO":3,"ABRIL":4,"MAYO":5,"JUNIO":6,
-    "JULIO":7,"AGOSTO":8,"SEPTIEMBRE":9,"OCTUBRE":10,"NOVIEMBRE":11,"DICIEMBRE":12
-}
+# Fechas/orden para "AGOSTO 2025"
+MES_A_NUM = {"ENERO":1,"FEBRERO":2,"MARZO":3,"ABRIL":4,"MAYO":5,"JUNIO":6,"JULIO":7,"AGOSTO":8,"SEPTIEMBRE":9,"OCTUBRE":10,"NOVIEMBRE":11,"DICIEMBRE":12}
 def periodo_to_date(s: str):
     if not s or not isinstance(s, str):
         return pd.NaT
@@ -469,7 +465,7 @@ def build_ctrl_periodo_cum(df_ctrl: pd.DataFrame) -> pd.DataFrame:
         grp[c] = grp[c].map(pmfmt)
     return grp
 
-# ---- Consolidación para upload (evitar duplicados en un periodo) ----
+# Consolidación para upload (evitar duplicados por periodo)
 def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
@@ -587,9 +583,9 @@ with tab1:
                         "CÉDULA": _to_str(row.get("CÉDULA","")),
                         "FECHA DE LECTURA": _to_str(row.get("FECHA DE LECTURA","")),
                         "TIPO DE DOSÍMETRO": _to_str(row.get("TIPO DE DOSÍMETRO","") or "CE"),
-                        "Hp (10)": row.get("Hp (10)"),
-                        "Hp (0.07)": row.get("Hp (0.07)"),
-                        "Hp (3)": row.get("Hp (3)"),
+                        "Hp (10)": row.get("Hp (10)") if subir_pm_como_texto else (None if str(row.get("Hp (10)")).upper() == "PM" else float(row.get("Hp (10)"))),
+                        "Hp (0.07)": row.get("Hp (0.07)") if subir_pm_como_texto else (None if str(row.get("Hp (0.07)")).upper() == "PM" else float(row.get("Hp (0.07)"))),
+                        "Hp (3)": row.get("Hp (3)") if subir_pm_como_texto else (None if str(row.get("Hp (3)")).upper() == "PM" else float(row.get("Hp (3)"))),
                     }
                     rows.append({"fields": fields})
 
@@ -649,22 +645,49 @@ with tab2:
                 # Control por periodo (VIDA) + acumulados
                 ctrl_life_period = build_ctrl_periodo_cum(control_life) if not control_life.empty else pd.DataFrame()
 
-                # ---- ANUAL (sobre subconjunto filtrado para la vista) ----
+                # === Modo de ANUAL ===
+                st.markdown("#### Modo de ANUAL")
+                modo_anual = st.radio(
+                    "Cómo sumar ANUAL:",
+                    ["Meses seleccionados", "Año natural"],
+                    index=0,
+                    horizontal=True,
+                )
+
                 df_nx = df_nx_all.copy()
+
+                # Selectores
                 per_opts = sorted(df_nx["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist()) if "PERIODO DE LECTURA" in df_nx.columns else []
-                col1, col2 = st.columns(2)
-                with col1:
-                    per_sel = st.multiselect("Filtrar PERIODO DE LECTURA", per_opts, default=per_opts)
                 cli_opts = sorted(df_nx["CLIENTE"].dropna().astype(str).unique().tolist()) if "CLIENTE" in df_nx.columns else []
+
+                col1, col2, col3 = st.columns([1.4,1.4,1])
+                with col1:
+                    per_sel = st.multiselect("Filtrar PERIODO (para 'Meses seleccionados')", per_opts, default=per_opts)
                 with col2:
                     cli_sel = st.multiselect("Filtrar CLIENTE (opcional)", cli_opts, default=cli_opts)
 
-                if per_sel: df_nx = df_nx[df_nx["PERIODO DE LECTURA"].isin(per_sel)]
-                if cli_sel: df_nx = df_nx[df_nx["CLIENTE"].isin(cli_sel)]
+                def _periodo_a_anio(s: str) -> Optional[int]:
+                    m = re.match(r".*\s([0-9]{4})$", str(s).strip())
+                    return int(m.group(1)) if m else None
+
+                df_nx["__ANIO__"] = df_nx["PERIODO DE LECTURA"].map(_periodo_a_anio)
+                anio_opts = sorted([a for a in df_nx["__ANIO__"].dropna().unique().tolist()])
+                with col3:
+                    anio_sel = st.selectbox("Año (para 'Año natural')", options=anio_opts if anio_opts else [datetime.now().year], index=0)
+
+                if modo_anual == "Meses seleccionados":
+                    if per_sel:
+                        df_nx = df_nx[df_nx["PERIODO DE LECTURA"].isin(per_sel)]
+                else:
+                    df_nx = df_nx[df_nx["__ANIO__"] == anio_sel]
+
+                if cli_sel:
+                    df_nx = df_nx[df_nx["CLIENTE"].isin(cli_sel)]
 
                 for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
                     if h in df_nx.columns: df_nx[h] = df_nx[h].apply(hp_to_num)
 
+                # Personas/Control para ANUAL
                 personas = df_nx[df_nx["NOMBRE"].astype(str).str.upper().ne("CONTROL")].copy()
                 control   = df_nx[df_nx["NOMBRE"].astype(str).str.upper().eq("CONTROL")].copy()
 
@@ -692,7 +715,7 @@ with tab2:
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         per_view[c] = per_view[c].map(pmfmt)
                     per_view = ordenar_columnas_reporte(per_view, "personas")
-                    st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL filtrado + DE POR VIDA histórico)")
+                    st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL + DE POR VIDA)")
                     st.dataframe(per_view, use_container_width=True)
                 else:
                     st.info("No hay filas de personas para el reporte (Ninox).")
@@ -718,7 +741,7 @@ with tab2:
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         ctrl_view[c] = ctrl_view[c].map(pmfmt)
                     ctrl_view = ordenar_columnas_reporte(ctrl_view, "control")
-                    st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL filtrado + DE POR VIDA histórico)")
+                    st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL + DE POR VIDA)")
                     st.dataframe(ctrl_view, use_container_width=True)
                 else:
                     st.info("No hay filas de CONTROL para el reporte (Ninox).")
@@ -753,7 +776,7 @@ with tab2:
                     if not ctrl_annual_period.empty:
                         st.dataframe(ctrl_annual_period, use_container_width=True)
                     else:
-                        st.info("No hay datos de CONTROL por periodo para el ANUAL filtrado.")
+                        st.info("No hay datos de CONTROL por periodo para el ANUAL seleccionado.")
                 with st.expander("👀 Ver CONTROL por periodo (DE POR VIDA)"):
                     if not ctrl_life_period.empty:
                         st.dataframe(ctrl_life_period, use_container_width=True)
@@ -783,7 +806,7 @@ with tab2:
                 per_view["Hp (10)"]   = per_view["Hp (10) ANUAL"]
                 per_view["Hp (0.07)"] = per_view["Hp (0.07) ANUAL"]
                 per_view["Hp (3)"]    = per_view["Hp (3) ANUAL"]
-                # Vida = anual en esta rama (no hay histórico completo en memoria)
+                # Vida = anual en esta rama
                 per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
                 per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
                 per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
@@ -847,3 +870,4 @@ with tab2:
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+
