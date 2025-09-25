@@ -56,7 +56,7 @@ def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
         rows.append({k: fields.get(k) for k in [
             "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO",
             "NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
-            "Hp (10),"Hp (0.07),"Hp (3)
+            "Hp (10)","Hp (0.07)","Hp (3)"
         ]})
     df = pd.DataFrame(rows)
     # Normaliza PERIODO a texto completo por si viene abreviado
@@ -404,7 +404,7 @@ def aplicar_resta_control_y_formato(df_final: pd.DataFrame, umbral_pm: float = 0
 
     # Control: solo formateo 3 dec
     df_ctrl_view = df_ctrl.copy()
-    for h in ["Hp (10),"Hp (0.07),"Hp (3)"]:
+    for h in ["Hp (10)","Hp (0.07)","Hp (3)""]:
         df_ctrl_view[h] = df_ctrl_view[h].map(lambda x: f"{float(x):.2f}")
 
     df_vista = pd.concat([df_ctrl_view, out_view], ignore_index=True)
@@ -557,7 +557,7 @@ with tab2:
                     df_nx = df_nx[df_nx["CLIENTE"].isin(cli_sel)]
 
                 # Convertir Hp a numérico (PM⇒0) para sumar
-                for h in ["Hp (10),"Hp (0.07),"Hp (3)"]:
+                for h in ["Hp (10)","Hp (0.07)","Hp (3)""]:
                     if h in df_nx.columns:
                         df_nx[h] = df_nx[h].apply(hp_to_num)
 
@@ -631,5 +631,7 @@ with tab2:
                 )
             else:
                 st.info("No hay datos para descargar aún. Genera el reporte primero.")
+
+
 
 
