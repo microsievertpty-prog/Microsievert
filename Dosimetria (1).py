@@ -239,7 +239,7 @@ def construir_registros(df_lista: pd.DataFrame,
 
     for _, r in df_l.iterrows():
         cod = str(r["CÓDIGO_DOSÍMETRO"]).strip().upper()
-        if not cod or cod == "NAN": 
+        if not cod or cod == "NAN":
             continue
         if cod not in idx.index:
             continue
@@ -375,7 +375,8 @@ def aplicar_resta_control_y_formato(df_final: pd.DataFrame, umbral_pm: float = 0
                        .reset_index(drop=True)
 
     # DF numérico para reportes
-    df_num = out[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
+    df_num = out[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE","CÓDIGO DE USUARIO",
+                  "CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
 
     return df_vista, df_num
 
@@ -438,6 +439,31 @@ def pmfmt(v, thr: float = 0.005) -> str:
         return s if s else "PM"
     return "PM" if f < thr else f"{f:.2f}"
 
+# ---------- Ordenar columnas (Hp base primero, luego ANUAL/DE POR VIDA) ----------
+def ordenar_columnas_reporte(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
+    """
+    tipo: 'personas' o 'control'
+    Pone Hp (10), Hp (0.07), Hp (3) antes que ANUAL y DE POR VIDA.
+    Conserva otras columnas al final en el orden original.
+    """
+    if tipo == "personas":
+        primero = [
+            "CÓDIGO DE USUARIO","CLIENTE","NOMBRE","CÉDULA",
+            "Hp (10)","Hp (0.07)","Hp (3)",
+            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA",
+        ]
+    else:  # control
+        primero = [
+            "CÓDIGO DE DOSÍMETRO","CLIENTE",
+            "Hp (10)","Hp (0.07)","Hp (3)",
+            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA",
+        ]
+    existentes = [c for c in primero if c in df.columns]
+    resto = [c for c in df.columns if c not in existentes]
+    return df[existentes + resto]
+
 # ===================== TABS =====================
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
 
@@ -456,7 +482,7 @@ with tab1:
     upl_dosis = st.file_uploader("Selecciona CSV/XLS/XLSX (dosis)", type=["csv","xls","xlsx"], key="upl_dosis")
     df_dosis = leer_dosis(upl_dosis) if upl_dosis else None
     if df_dosis is not None and not df_dosis.empty:
-        st.success(f"Dosis cargadas: {len(df_dosis)} fila(s)")
+        st.success(f"Dosis cargadas: {len[df_dosis]} fila(s)")
         st.dataframe(df_dosis.head(15), use_container_width=True)
 
     # Filtro de periodos
@@ -595,16 +621,27 @@ with tab2:
                     }).rename(columns={
                         "Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"
                     })
+                    # DE POR VIDA = ANUAL (mismo periodo de cálculo)
                     per_anual["Hp (10) DE POR VIDA"]   = per_anual["Hp (10) ANUAL"]
                     per_anual["Hp (0.07) DE POR VIDA"] = per_anual["Hp (0.07) ANUAL"]
                     per_anual["Hp (3) DE POR VIDA"]    = per_anual["Hp (3) ANUAL"]
 
+                    # Agrega columnas base
                     per_view = per_anual.copy()
-                    for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+                    per_view["Hp (10)"]   = per_view["Hp (10) ANUAL"]
+                    per_view["Hp (0.07)"] = per_view["Hp (0.07) ANUAL"]
+                    per_view["Hp (3)"]    = per_view["Hp (3) ANUAL"]
+
+                    # Formato PM/0.00 en todas Hp*
+                    for c in ["Hp (10)", "Hp (0.07)", "Hp (3)",
+                              "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         per_view[c] = per_view[c].map(pmfmt)
 
-                    st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL y DE POR VIDA)")
+                    # Reordenar columnas
+                    per_view = ordenar_columnas_reporte(per_view, "personas")
+
+                    st.markdown("### Personas — por **CÓDIGO DE USUARIO**")
                     st.dataframe(per_view, use_container_width=True)
                 else:
                     st.info("No hay filas de personas para el reporte (Ninox).")
@@ -621,23 +658,31 @@ with tab2:
                     ctrl_anual["Hp (3) DE POR VIDA"]    = ctrl_anual["Hp (3) ANUAL"]
 
                     ctrl_view = ctrl_anual.copy()
-                    for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+                    ctrl_view["Hp (10)"]   = ctrl_view["Hp (10) ANUAL"]
+                    ctrl_view["Hp (0.07)"] = ctrl_view["Hp (0.07) ANUAL"]
+                    ctrl_view["Hp (3)"]    = ctrl_view["Hp (3) ANUAL"]
+
+                    for c in ["Hp (10)", "Hp (0.07)", "Hp (3)",
+                              "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         ctrl_view[c] = ctrl_view[c].map(pmfmt)
 
-                    st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL y DE POR VIDA)")
+                    # Reordenar columnas
+                    ctrl_view = ordenar_columnas_reporte(ctrl_view, "control")
+
+                    st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO**")
                     st.dataframe(ctrl_view, use_container_width=True)
                 else:
                     st.info("No hay filas de CONTROL para el reporte (Ninox).")
 
-                # Descarga Excel (usa las vistas para conservar PM/0.00)
-                if (not per_view.empty) or (not ctrl_view.empty):
+                # Descarga Excel (usa las vistas para conservar PM/0.00 y orden)
+                if (('per_view' in locals() and not per_view.empty) or ('ctrl_view' in locals() and not ctrl_view.empty)):
                     buf = BytesIO()
                     df_nx_detalle = df_nx.copy()
                     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                        if not per_view.empty:
+                        if 'per_view' in locals() and not per_view.empty:
                             per_view.to_excel(writer, index=False, sheet_name="Personas")
-                        if not ctrl_view.empty:
+                        if 'ctrl_view' in locals() and not ctrl_view.empty:
                             ctrl_view.to_excel(writer, index=False, sheet_name="Control")
                         if not df_nx_detalle.empty:
                             df_nx_detalle.to_excel(writer, index=False, sheet_name="Detalle")
@@ -674,11 +719,19 @@ with tab2:
                 per_anual["Hp (3) DE POR VIDA"]    = per_anual["Hp (3) ANUAL"]
 
                 per_view = per_anual.copy()
-                for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+                per_view["Hp (10)"]   = per_view["Hp (10) ANUAL"]
+                per_view["Hp (0.07)"] = per_view["Hp (0.07) ANUAL"]
+                per_view["Hp (3)"]    = per_view["Hp (3) ANUAL"]
+
+                for c in ["Hp (10)", "Hp (0.07)", "Hp (3)",
+                          "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                           "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                     per_view[c] = per_view[c].map(pmfmt)
 
-                st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL y DE POR VIDA)")
+                # Reordenar
+                per_view = ordenar_columnas_reporte(per_view, "personas")
+
+                st.markdown("### Personas — por **CÓDIGO DE USUARIO**")
                 st.dataframe(per_view, use_container_width=True)
             else:
                 st.info("No hay filas de personas para el reporte.")
@@ -697,22 +750,30 @@ with tab2:
                 ctrl_anual["Hp (3) DE POR VIDA"]    = ctrl_anual["Hp (3) ANUAL"]
 
                 ctrl_view = ctrl_anual.copy()
-                for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+                ctrl_view["Hp (10)"]   = ctrl_view["Hp (10) ANUAL"]
+                ctrl_view["Hp (0.07)"] = ctrl_view["Hp (0.07) ANUAL"]
+                ctrl_view["Hp (3)"]    = ctrl_view["Hp (3) ANUAL"]
+
+                for c in ["Hp (10)", "Hp (0.07)", "Hp (3)",
+                          "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                           "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                     ctrl_view[c] = ctrl_view[c].map(pmfmt)
 
-                st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL y DE POR VIDA)")
+                # Reordenar
+                ctrl_view = ordenar_columnas_reporte(ctrl_view, "control")
+
+                st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO**")
                 st.dataframe(ctrl_view, use_container_width=True)
             else:
                 st.info("No hay filas de CONTROL en el cruce actual.")
 
             # Descarga Excel (desde sesión)
-            if (not per_view.empty) or (not ctrl_view.empty):
+            if (('per_view' in locals() and not per_view.empty) or ('ctrl_view' in locals() and not ctrl_view.empty)):
                 buf = BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                    if not per_view.empty:
+                    if 'per_view' in locals() and not per_view.empty:
                         per_view.to_excel(writer, index=False, sheet_name="Personas")
-                    if not ctrl_view.empty:
+                    if 'ctrl_view' in locals() and not ctrl_view.empty:
                         ctrl_view.to_excel(writer, index=False, sheet_name="Control")
                     det = st.session_state.get("df_final_vista")
                     if det is not None and not det.empty:
@@ -723,6 +784,8 @@ with tab2:
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+
+
 
 
 
