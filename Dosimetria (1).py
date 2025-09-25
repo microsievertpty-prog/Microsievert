@@ -467,8 +467,9 @@ with tab2:
     else:
         # =============== PERSONAS (por CÓDIGO DE USUARIO) =================
         personas = df_num[df_num["NOMBRE"].str.strip().str.upper() != "CONTROL"].copy()
+        per_anual = None
         if not personas.empty:
-            # Sumas ANUALES por CÓDIGO DE USUARIO (sobre los valores ya corregidos por CONTROL)
+            # Sumas ANUALES por CÓDIGO DE USUARIO (numérico, ya corregido por CONTROL)
             per_anual = personas.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
                 "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
                 "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
@@ -477,23 +478,26 @@ with tab2:
                 "_Hp007_NUM":"Hp (0.07) ANUAL",
                 "_Hp3_NUM":"Hp (3) ANUAL"
             })
-            # "DE POR VIDA" por ahora igual al ANUAL (mismo valor)
+            # DE POR VIDA = ANUAL (mismo valor por ahora)
             per_anual["Hp (10) DE POR VIDA"]  = per_anual["Hp (10) ANUAL"]
             per_anual["Hp (0.07) DE POR VIDA"] = per_anual["Hp (0.07) ANUAL"]
             per_anual["Hp (3) DE POR VIDA"]    = per_anual["Hp (3) ANUAL"]
-            # Formato a 2 decimales
+
+            # Vista con 2 decimales
+            per_view = per_anual.copy()
             for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
-                per_anual[c] = per_anual[c].astype(float).map(lambda v: f"{v:.2f}")
+                per_view[c] = per_view[c].astype(float).map(lambda v: f"{v:.2f}")
 
             st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL y DE POR VIDA)")
-            st.dataframe(per_anual, use_container_width=True)
+            st.dataframe(per_view, use_container_width=True)
         else:
             st.info("No hay filas de personas para el reporte.")
 
         # =============== CONTROL (por CÓDIGO DE DOSÍMETRO) =================
         control_vista = df_vista[df_vista["NOMBRE"].str.strip().str.upper() == "CONTROL"].copy()
+        ctrl_anual = None
         if not control_vista.empty:
-            # Convertir a numérico para sumar
+            # Convertir a numérico para sumar (numérico para Excel)
             for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
                 control_vista[h] = pd.to_numeric(control_vista[h], errors="coerce").fillna(0.0)
             ctrl_anual = control_vista.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
@@ -504,16 +508,57 @@ with tab2:
                 "Hp (0.07)":"Hp (0.07) ANUAL",
                 "Hp (3)":"Hp (3) ANUAL"
             })
-            # DE POR VIDA = ANUAL (mismo criterio)
+            # DE POR VIDA = ANUAL
             ctrl_anual["Hp (10) DE POR VIDA"]  = ctrl_anual["Hp (10) ANUAL"]
             ctrl_anual["Hp (0.07) DE POR VIDA"] = ctrl_anual["Hp (0.07) ANUAL"]
             ctrl_anual["Hp (3) DE POR VIDA"]    = ctrl_anual["Hp (3) ANUAL"]
-            # Formato 2 decimales
+
+            # Vista con 2 decimales
+            ctrl_view = ctrl_anual.copy()
             for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
-                ctrl_anual[c] = ctrl_anual[c].astype(float).map(lambda v: f"{v:.2f}")
+                ctrl_view[c] = ctrl_view[c].astype(float).map(lambda v: f"{v:.2f}")
 
             st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL y DE POR VIDA)")
-            st.dataframe(ctrl_anual, use_container_width=True)
+            st.dataframe(ctrl_view, use_container_width=True)
         else:
             st.info("No hay filas de CONTROL para el reporte.")
+
+        # =============== DESCARGA (Excel) =================
+        if (per_anual is not None and not per_anual.empty) or (ctrl_anual is not None and not ctrl_anual.empty):
+            from io import BytesIO
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                if per_anual is not None and not per_anual.empty:
+                    per_to_save = per_anual.copy()
+                    # redondeo a 2 decimales (numérico) para el archivo
+                    for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
+                        per_to_save[c] = per_to_save[c].astype(float).round(2)
+                    per_to_save.to_excel(writer, index=False, sheet_name="Personas")
+                    # formato numérico en Excel
+                    workbook  = writer.book
+                    worksheet = writer.sheets["Personas"]
+                    num_fmt = workbook.add_format({"num_format": "0.00"})
+                    # aplicar a columnas numéricas (E..J aprox, ajusta por seguridad)
+                    for col_idx, col_name in enumerate(per_to_save.columns):
+                        if col_name.startswith("Hp "):
+                            worksheet.set_column(col_idx, col_idx, 12, num_fmt)
+                if ctrl_anual is not None and not ctrl_anual.empty:
+                    ctrl_to_save = ctrl_anual.copy()
+                    for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
+                        ctrl_to_save[c] = ctrl_to_save[c].astype(float).round(2)
+                    ctrl_to_save.to_excel(writer, index=False, sheet_name="Control")
+                    workbook  = writer.book
+                    worksheet = writer.sheets["Control"]
+                    num_fmt = workbook.add_format({"num_format": "0.00"})
+                    for col_idx, col_name in enumerate(ctrl_to_save.columns):
+                        if col_name.startswith("Hp "):
+                            worksheet.set_column(col_idx, col_idx, 12, num_fmt)
+            st.download_button(
+                label="📥 Descargar Reporte (Excel)",
+                data=buf.getvalue(),
+                file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("No hay datos para descargar aún. Genera el reporte primero.")
 
