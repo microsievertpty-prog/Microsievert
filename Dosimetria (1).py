@@ -617,9 +617,8 @@ with tab2:
             if df_nx_all.empty:
                 st.warning("No se recibieron registros desde Ninox.")
             else:
-                # ---- DE POR VIDA (histórico completo) ----
+                # Normalizar claves y HP numérico
                 df_life = df_nx_all.copy()
-                # normalizar claves y Hp a num
                 for c in ["CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","CLIENTE","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO"]:
                     if c in df_life.columns:
                         df_life[c] = df_life[c].astype(str).str.strip()
@@ -627,28 +626,6 @@ with tab2:
                     df_life["NOMBRE"] = df_life["NOMBRE"].str.upper().fillna("")
                 for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
                     if h in df_life.columns: df_life[h] = df_life[h].apply(hp_to_num)
-
-                personas_life = df_life[df_life["NOMBRE"] != "CONTROL"].copy()
-                control_life  = df_life[df_life["NOMBRE"] == "CONTROL"].copy()
-
-                per_life = personas_life.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
-                    "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
-                }).rename(columns={
-                    "Hp (10)":"Hp (10) DE POR VIDA",
-                    "Hp (0.07)":"Hp (0.07) DE POR VIDA",
-                    "Hp (3)":"Hp (3) DE POR VIDA"
-                }) if not personas_life.empty else pd.DataFrame()
-
-                ctrl_life = control_life.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
-                    "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
-                }).rename(columns={
-                    "Hp (10)":"Hp (10) DE POR VIDA",
-                    "Hp (0.07)":"Hp (0.07) DE POR VIDA",
-                    "Hp (3)":"Hp (3) DE POR VIDA"
-                }) if not control_life.empty else pd.DataFrame()
-
-                # Control por periodo (VIDA) + acumulados
-                ctrl_life_period = build_ctrl_periodo_cum(control_life) if not control_life.empty else pd.DataFrame()
 
                 # === Modo de ANUAL ===
                 st.markdown("#### Modo de ANUAL")
@@ -659,13 +636,7 @@ with tab2:
                     horizontal=True,
                 )
 
-                df_nx = df_nx_all.copy()
-                # normalizar claves (muy importante para sumar 188 + 188)
-                for c in ["CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","CLIENTE","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO"]:
-                    if c in df_nx.columns:
-                        df_nx[c] = df_nx[c].astype(str).str.strip()
-                if "NOMBRE" in df_nx.columns:
-                    df_nx["NOMBRE"] = df_nx["NOMBRE"].str.upper().fillna("")
+                df_nx = df_life.copy()  # ya normalizado
 
                 # Selectores
                 per_opts = sorted(df_nx["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist()) if "PERIODO DE LECTURA" in df_nx.columns else []
@@ -695,18 +666,13 @@ with tab2:
                 if cli_sel:
                     df_nx = df_nx[df_nx["CLIENTE"].isin(cli_sel)]
 
-                # Asegurar Hp numéricas (PM->0) para sumar
-                for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-                    if h in df_nx.columns: df_nx[h] = df_nx[h].apply(hp_to_num)
-
-                # Personas/Control para ANUAL
+                # Separar personas/control
                 personas = df_nx[df_nx["NOMBRE"] != "CONTROL"].copy()
-                control   = df_nx[df_nx["NOMBRE"] == "CONTROL"].copy()
+                control  = df_nx[df_nx["NOMBRE"] == "CONTROL"].copy()
 
-                # --- Personas (ANUAL + DE POR VIDA) ---
+                # --- Personas (ANUAL = VIDA) ---
                 per_view = pd.DataFrame()
                 if not personas.empty:
-                    # (AQUÍ ESTÁ LA CLAVE) — ya normalizado CÓDIGO DE USUARIO como string
                     per_anual = personas.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
                         "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
                         "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
@@ -714,26 +680,26 @@ with tab2:
                         "Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"
                     })
                     per_view = per_anual.copy()
+                    # visibles base
                     per_view["Hp (10)"]   = per_view["Hp (10) ANUAL"]
                     per_view["Hp (0.07)"] = per_view["Hp (0.07) ANUAL"]
                     per_view["Hp (3)"]    = per_view["Hp (3) ANUAL"]
-                    if not per_life.empty:
-                        per_view = per_view.merge(per_life, on="CÓDIGO DE USUARIO", how="left")
-                    else:
-                        per_view["Hp (10) DE POR VIDA"] = 0.0
-                        per_view["Hp (0.07) DE POR VIDA"] = 0.0
-                        per_view["Hp (3) DE POR VIDA"] = 0.0
+                    # VIDA = ANUAL
+                    per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
+                    per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
+                    per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
+                    # formato
                     for c in ["Hp (10)","Hp (0.07)","Hp (3)",
                               "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         per_view[c] = per_view[c].map(pmfmt)
                     per_view = ordenar_columnas_reporte(per_view, "personas")
-                    st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL + DE POR VIDA)")
+                    st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL = DE POR VIDA)")
                     st.dataframe(per_view, use_container_width=True)
                 else:
                     st.info("No hay filas de personas para el reporte (Ninox).")
 
-                # --- Control (ANUAL + DE POR VIDA) ---
+                # --- Control (ANUAL = VIDA) ---
                 ctrl_view = pd.DataFrame()
                 if not control.empty:
                     ctrl_anual = control.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
@@ -742,27 +708,28 @@ with tab2:
                         "Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"
                     })
                     ctrl_view = ctrl_anual.copy()
+                    # visibles base
                     ctrl_view["Hp (10)"]   = ctrl_view["Hp (10) ANUAL"]
                     ctrl_view["Hp (0.07)"] = ctrl_view["Hp (0.07) ANUAL"]
                     ctrl_view["Hp (3)"]    = ctrl_view["Hp (3) ANUAL"]
-                    if not ctrl_life.empty:
-                        ctrl_view = ctrl_view.merge(ctrl_life, on="CÓDIGO DE DOSÍMETRO", how="left")
-                    else:
-                        ctrl_view["Hp (10) DE POR VIDA"] = 0.0
-                        ctrl_view["Hp (0.07) DE POR VIDA"] = 0.0
-                        ctrl_view["Hp (3) DE POR VIDA"] = 0.0
+                    # VIDA = ANUAL
+                    ctrl_view["Hp (10) DE POR VIDA"]   = ctrl_view["Hp (10) ANUAL"]
+                    ctrl_view["Hp (0.07) DE POR VIDA"] = ctrl_view["Hp (0.07) ANUAL"]
+                    ctrl_view["Hp (3) DE POR VIDA"]    = ctrl_view["Hp (3) ANUAL"]
+                    # formato
                     for c in ["Hp (10)","Hp (0.07)","Hp (3)",
                               "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         ctrl_view[c] = ctrl_view[c].map(pmfmt)
                     ctrl_view = ordenar_columnas_reporte(ctrl_view, "control")
-                    st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL + DE POR VIDA)")
+                    st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL = DE POR VIDA)")
                     st.dataframe(ctrl_view, use_container_width=True)
                 else:
                     st.info("No hay filas de CONTROL para el reporte (Ninox).")
 
-                # Control por periodo (ANUAL) + acumulados
+                # Control por periodo (ANUAL y VIDA)
                 ctrl_annual_period = build_ctrl_periodo_cum(control) if not control.empty else pd.DataFrame()
+                ctrl_life_period   = build_ctrl_periodo_cum(df_life[df_life["NOMBRE"] == "CONTROL"]) if not df_life.empty else pd.DataFrame()
 
                 # Descarga Excel con todas las vistas
                 if (('per_view' in locals() and not per_view.empty) or ('ctrl_view' in locals() and not ctrl_view.empty)):
@@ -774,11 +741,10 @@ with tab2:
                         if 'ctrl_view' in locals() and not ctrl_view.empty:
                             ctrl_view.to_excel(writer, index=False, sheet_name="Control")
                         if not df_nx_detalle.empty:
-                            df_nx_detalle.to_excel(writer, index=False, sheet_name="Detalle")
+                            df_nx_detalle.to_excel(writer, index=False, sheet_name="Detalle (ANUAL)")
                         if not ctrl_annual_period.empty:
                             ctrl_annual_period.to_excel(writer, index=False, sheet_name="Control por Periodo (ANUAL)")
-                        # vida por periodo acumulado
-                        if not control_life.empty:
+                        if not ctrl_life_period.empty:
                             ctrl_life_period.to_excel(writer, index=False, sheet_name="Control por Periodo (VIDA)")
                     st.download_button(
                         label="📥 Descargar Reporte (Excel)",
@@ -805,9 +771,7 @@ with tab2:
         if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
             st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
         else:
-            # personas = df_num (numérico y ya corregido por control)
             personas = df_num[df_num["NOMBRE"].str.strip().str.upper() != "CONTROL"].copy()
-            # normalizar claves en sesión (CLAVE PARA SUMAR 188 + 188)
             for c in ["CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","CLIENTE","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO"]:
                 if c in personas.columns:
                     personas[c] = personas[c].astype(str).str.strip()
@@ -830,7 +794,7 @@ with tab2:
                 per_view["Hp (10)"]   = per_view["Hp (10) ANUAL"]
                 per_view["Hp (0.07)"] = per_view["Hp (0.07) ANUAL"]
                 per_view["Hp (3)"]    = per_view["Hp (3) ANUAL"]
-                # Vida = anual en esta rama
+                # VIDA = ANUAL (sesión)
                 per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
                 per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
                 per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
@@ -839,7 +803,7 @@ with tab2:
                           "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                     per_view[c] = per_view[c].map(pmfmt)
                 per_view = ordenar_columnas_reporte(per_view, "personas")
-                st.markdown("### Personas — por **CÓDIGO DE USUARIO** (datos de la sesión)")
+                st.markdown("### Personas — por **CÓDIGO DE USUARIO** (datos de la sesión, ANUAL = VIDA)")
                 st.dataframe(per_view, use_container_width=True)
             else:
                 st.info("No hay filas de personas en la sesión.")
@@ -860,7 +824,7 @@ with tab2:
                           "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                     ctrl_view[c] = ctrl_view[c].map(pmfmt)
                 ctrl_view = ordenar_columnas_reporte(ctrl_view, "control")
-                st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (datos de la sesión)")
+                st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (datos de la sesión, ANUAL = VIDA)")
                 st.dataframe(ctrl_view, use_container_width=True)
             else:
                 st.info("No hay filas de CONTROL en la sesión.")
@@ -892,5 +856,3 @@ with tab2:
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-
-
