@@ -697,31 +697,37 @@ with tab2:
                 if "CÓDIGO DE USUARIO" in personas.columns:
                     personas["CÓDIGO DE USUARIO"] = personas["CÓDIGO DE USUARIO"].map(canon_user_code)
 
-                # --- Personas (ANUAL = VIDA) ---
+                # --- Personas ---
                 per_view = pd.DataFrame()
                 if not personas.empty:
+                    # 1) Suma ANUAL
                     per_anual = personas.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
                         "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
                         "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
                     }).rename(columns={
                         "Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"
                     })
-                    per_view = per_anual.copy()
-                    # visibles base
-                    per_view["Hp (10)"]   = per_view["Hp (10) ANUAL"]
-                    per_view["Hp (0.07)"] = per_view["Hp (0.07) ANUAL"]
-                    per_view["Hp (3)"]    = per_view["Hp (3) ANUAL"]
+                    # 2) Último mes por usuario para columnas base
+                    personas["__fecha__"] = personas["PERIODO DE LECTURA"].map(periodo_to_date)
+                    idx_last = personas.groupby("CÓDIGO DE USUARIO")["__fecha__"].idxmax()
+                    per_last = (personas.loc[idx_last, ["CÓDIGO DE USUARIO","Hp (10)","Hp (0.07)","Hp (3)"]]
+                                .rename(columns={"Hp (10)":"Hp (10) LAST","Hp (0.07)":"Hp (0.07) LAST","Hp (3)":"Hp (3) LAST"}))
+                    # 3) Unir y formar salida
+                    per_view = per_anual.merge(per_last, on="CÓDIGO DE USUARIO", how="left")
+                    per_view["Hp (10)"]   = per_view["Hp (10) LAST"]
+                    per_view["Hp (0.07)"] = per_view["Hp (0.07) LAST"]
+                    per_view["Hp (3)"]    = per_view["Hp (3) LAST"]
                     # VIDA = ANUAL
                     per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
                     per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
                     per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
-                    # formato
+                    # Formato
                     for c in ["Hp (10)","Hp (0.07)","Hp (3)",
                               "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         per_view[c] = per_view[c].map(pmfmt)
                     per_view = ordenar_columnas_reporte(per_view, "personas")
-                    st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL = DE POR VIDA)")
+                    st.markdown("### Personas — por **CÓDIGO DE USUARIO** (último mes + ANUAL = VIDA)")
                     st.dataframe(per_view, use_container_width=True)
                 else:
                     st.info("No hay filas de personas para el reporte (Ninox).")
@@ -735,7 +741,7 @@ with tab2:
                         "Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"
                     })
                     ctrl_view = ctrl_anual.copy()
-                    # visibles base
+                    # visibles base = ANUAL (si quieres último mes para control, avísame y lo agrego igual que personas)
                     ctrl_view["Hp (10)"]   = ctrl_view["Hp (10) ANUAL"]
                     ctrl_view["Hp (0.07)"] = ctrl_view["Hp (0.07) ANUAL"]
                     ctrl_view["Hp (3)"]    = ctrl_view["Hp (3) ANUAL"]
@@ -798,8 +804,8 @@ with tab2:
         if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
             st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
         else:
+            # PERSONAS desde NUM (valores corregidos)
             personas = df_num[df_num["NOMBRE"].str.strip().str.upper() != "CONTROL"].copy()
-            # Normalización clave y canonización
             for c in ["CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","CLIENTE","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO"]:
                 if c in personas.columns:
                     personas[c] = personas[c].astype(str).str.strip()
@@ -814,26 +820,34 @@ with tab2:
             per_view = pd.DataFrame(); ctrl_view = pd.DataFrame()
 
             if not personas.empty:
+                # 1) ANUAL (suma de NUM)
                 per_anual = personas.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
                     "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
                     "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
                 }).rename(columns={
                     "_Hp10_NUM":"Hp (10) ANUAL","_Hp007_NUM":"Hp (0.07) ANUAL","_Hp3_NUM":"Hp (3) ANUAL"
                 })
-                per_view = per_anual.copy()
-                per_view["Hp (10)"]   = per_view["Hp (10) ANUAL"]
-                per_view["Hp (0.07)"] = per_view["Hp (0.07) ANUAL"]
-                per_view["Hp (3)"]    = per_view["Hp (3) ANUAL"]
-                # VIDA = ANUAL (sesión)
+                # 2) Último mes por usuario (NUM)
+                personas["__fecha__"] = personas["PERIODO DE LECTURA"].map(periodo_to_date)
+                idx_last = personas.groupby("CÓDIGO DE USUARIO")["__fecha__"].idxmax()
+                per_last = (personas.loc[idx_last, ["CÓDIGO DE USUARIO","_Hp10_NUM","_Hp007_NUM","_Hp3_NUM"]]
+                            .rename(columns={"_Hp10_NUM":"Hp (10) LAST","_Hp007_NUM":"Hp (0.07) LAST","_Hp3_NUM":"Hp (3) LAST"}))
+                # 3) Unir
+                per_view = per_anual.merge(per_last, on="CÓDIGO DE USUARIO", how="left")
+                per_view["Hp (10)"]   = per_view["Hp (10) LAST"]
+                per_view["Hp (0.07)"] = per_view["Hp (0.07) LAST"]
+                per_view["Hp (3)"]    = per_view["Hp (3) LAST"]
+                # VIDA = ANUAL
                 per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
                 per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
                 per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
+                # Formato
                 for c in ["Hp (10)","Hp (0.07)","Hp (3)",
                           "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                           "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                     per_view[c] = per_view[c].map(pmfmt)
                 per_view = ordenar_columnas_reporte(per_view, "personas")
-                st.markdown("### Personas — por **CÓDIGO DE USUARIO** (datos de la sesión, ANUAL = VIDA)")
+                st.markdown("### Personas — por **CÓDIGO DE USUARIO** (último mes + ANUAL = VIDA)")
                 st.dataframe(per_view, use_container_width=True)
             else:
                 st.info("No hay filas de personas en la sesión.")
@@ -843,6 +857,7 @@ with tab2:
                     "CLIENTE":"last","Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
                 }).rename(columns={"Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"})
                 ctrl_view = ctrl_anual.copy()
+                # visibles base = ANUAL (si quieres último mes para control, avísame y lo agrego)
                 ctrl_view["Hp (10)"]   = ctrl_view["Hp (10) ANUAL"]
                 ctrl_view["Hp (0.07)"] = ctrl_view["Hp (0.07) ANUAL"]
                 ctrl_view["Hp (3)"]    = ctrl_view["Hp (3) ANUAL"]
@@ -854,7 +869,7 @@ with tab2:
                           "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                     ctrl_view[c] = ctrl_view[c].map(pmfmt)
                 ctrl_view = ordenar_columnas_reporte(ctrl_view, "control")
-                st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (datos de la sesión, ANUAL = VIDA)")
+                st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL = VIDA)")
                 st.dataframe(ctrl_view, use_container_width=True)
             else:
                 st.info("No hay filas de CONTROL en la sesión.")
@@ -886,3 +901,4 @@ with tab2:
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+
