@@ -23,6 +23,20 @@ st.title("🧪 Carga y Cruce de Dosis → Ninox (**BASE DE DATOS**)")
 def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
+# Canonizador para garantizar que CÓDIGO DE USUARIO se agrupe correctamente
+def canon_user_code(x: str) -> str:
+    """
+    Devuelve un código canónico para agrupar:
+    - str + strip + upper
+    - elimina espacios
+    - si hay dígitos, toma solo dígitos (p. ej. ' 001-88 ' -> '188')
+      (Si necesitas preservar ceros a la izquierda, cambia el return por 'return s')
+    """
+    s = str(x or "").strip().upper()
+    s = re.sub(r"\s+", "", s)
+    digits = re.sub(r"\D", "", s)
+    return digits if digits != "" else s
+
 # ---------- Normalización de PERIODO ----------
 MES_MAP = {
     "ENE":"ENERO","FEB":"FEBRERO","MAR":"MARZO","ABR":"ABRIL","MAY":"MAYO","JUN":"JUNIO",
@@ -467,13 +481,19 @@ def build_ctrl_periodo_cum(df_ctrl: pd.DataFrame) -> pd.DataFrame:
 def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
+
     personas_num = df_num[df_num["NOMBRE"].astype(str).str.strip().str.upper() != "CONTROL"].copy()
+    # Canonizar CÓDIGO DE USUARIO antes de agrupar para que no se duplique al subir
+    if "CÓDIGO DE USUARIO" in personas_num.columns:
+        personas_num["CÓDIGO DE USUARIO"] = personas_num["CÓDIGO DE USUARIO"].map(canon_user_code)
+
     per_consol = pd.DataFrame()
     if not personas_num.empty:
         per_consol = personas_num.groupby(["PERIODO DE LECTURA","CÓDIGO DE USUARIO"], as_index=False).agg({
             "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last","TIPO DE DOSÍMETRO":"last","FECHA DE LECTURA":"last",
             "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
         }).rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"})
+
     control_v = df_vista[df_vista["NOMBRE"].astype(str).str.strip().str.upper() == "CONTROL"].copy()
     ctrl_consol = pd.DataFrame()
     if not control_v.empty:
@@ -624,6 +644,9 @@ with tab2:
                         df_life[c] = df_life[c].astype(str).str.strip()
                 if "NOMBRE" in df_life.columns:
                     df_life["NOMBRE"] = df_life["NOMBRE"].str.upper().fillna("")
+                # Canonizar códigos y hp num
+                if "CÓDIGO DE USUARIO" in df_life.columns:
+                    df_life["CÓDIGO DE USUARIO"] = df_life["CÓDIGO DE USUARIO"].map(canon_user_code)
                 for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
                     if h in df_life.columns: df_life[h] = df_life[h].apply(hp_to_num)
 
@@ -636,7 +659,7 @@ with tab2:
                     horizontal=True,
                 )
 
-                df_nx = df_life.copy()  # ya normalizado
+                df_nx = df_life.copy()  # ya normalizado + canonizado
 
                 # Selectores
                 per_opts = sorted(df_nx["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist()) if "PERIODO DE LECTURA" in df_nx.columns else []
@@ -669,6 +692,10 @@ with tab2:
                 # Separar personas/control
                 personas = df_nx[df_nx["NOMBRE"] != "CONTROL"].copy()
                 control  = df_nx[df_nx["NOMBRE"] == "CONTROL"].copy()
+
+                # (re-canonizar por si filtrado cambió algo)
+                if "CÓDIGO DE USUARIO" in personas.columns:
+                    personas["CÓDIGO DE USUARIO"] = personas["CÓDIGO DE USUARIO"].map(canon_user_code)
 
                 # --- Personas (ANUAL = VIDA) ---
                 per_view = pd.DataFrame()
@@ -772,9 +799,12 @@ with tab2:
             st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
         else:
             personas = df_num[df_num["NOMBRE"].str.strip().str.upper() != "CONTROL"].copy()
+            # Normalización clave y canonización
             for c in ["CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","CLIENTE","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO"]:
                 if c in personas.columns:
                     personas[c] = personas[c].astype(str).str.strip()
+            if "CÓDIGO DE USUARIO" in personas.columns:
+                personas["CÓDIGO DE USUARIO"] = personas["CÓDIGO DE USUARIO"].map(canon_user_code)
 
             control_vista = df_vista[df_vista["NOMBRE"].str.strip().str.upper() == "CONTROL"].copy()
             for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
