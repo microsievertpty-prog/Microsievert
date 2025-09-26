@@ -112,16 +112,19 @@ def periodo_to_date(s: str):
         return pd.NaT
 
 # ===== Orden de columnas pedido =====
-def ordenar_hp_cols(df: pd.DataFrame) -> pd.DataFrame:
-    orden = [
+def ordenar_cols_reporte(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
+    base_personas = ["CÓDIGO DE USUARIO", "CLIENTE", "NOMBRE", "CÉDULA"]
+    base_control  = ["CÓDIGO DE DOSÍMETRO", "CLIENTE"]
+    hp = [
         "Hp (10)", "Hp (0.07)", "Hp (3)",
         "Hp (10) ANUAL", "Hp (0.07) ANUAL", "Hp (3) ANUAL",
         "Hp (10) DE POR VIDA", "Hp (0.07) DE POR VIDA", "Hp (3) DE POR VIDA",
     ]
-    front = [c for c in orden if c in df.columns]
-    tail  = [c for c in df.columns if c not in front]
+    base = base_personas if tipo == "personas" else base_control
+    frente = [c for c in base + hp if c in df.columns]
+    cola   = [c for c in df.columns if c not in frente]
     try:
-        return df[front + tail]
+        return df[frente + cola]
     except Exception:
         return df
 
@@ -631,7 +634,6 @@ with tab1:
 
                 if res.get("ok"):
                     st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s).")
-                    # hint: podrías limpiar session_state si quieres
                 else:
                     st.error(f"❌ Error al subir: {res.get('error')}")
 
@@ -705,7 +707,7 @@ with tab2:
                               "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         per_view[c] = per_view[c].map(pmfmt)
-                    per_view = ordenar_hp_cols(per_view)
+                    per_view = ordenar_cols_reporte(per_view, "personas")
 
                     st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL y DE POR VIDA)")
                     st.dataframe(per_view, use_container_width=True)
@@ -740,7 +742,7 @@ with tab2:
                               "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         ctrl_view[c] = ctrl_view[c].map(pmfmt)
-                    ctrl_view = ordenar_hp_cols(ctrl_view)
+                    ctrl_view = ordenar_cols_reporte(ctrl_view, "control")
 
                     st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL y DE POR VIDA)")
                     st.dataframe(ctrl_view, use_container_width=True)
@@ -752,9 +754,9 @@ with tab2:
                     buf = BytesIO()
                     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                         if 'per_view' in locals() and not per_view.empty:
-                            ordenar_hp_cols(per_view).to_excel(writer, index=False, sheet_name="Personas")
+                            ordenar_cols_reporte(per_view, "personas").to_excel(writer, index=False, sheet_name="Personas")
                         if 'ctrl_view' in locals() and not ctrl_view.empty:
-                            ordenar_hp_cols(ctrl_view).to_excel(writer, index=False, sheet_name="Control")
+                            ordenar_cols_reporte(ctrl_view, "control").to_excel(writer, index=False, sheet_name="Control")
                         df_nx.to_excel(writer, index=False, sheet_name="Detalle")
                     st.download_button(
                         label="📥 Descargar Reporte (Excel)",
@@ -800,7 +802,7 @@ with tab2:
                           "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                           "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                     per_view[c] = per_view[c].map(pmfmt)
-                per_view = ordenar_hp_cols(per_view)
+                per_view = ordenar_cols_reporte(per_view, "personas")
 
                 st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL y DE POR VIDA)")
                 st.dataframe(per_view, use_container_width=True)
@@ -842,7 +844,7 @@ with tab2:
                           "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                           "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                     ctrl_view[c] = ctrl_view[c].map(pmfmt)
-                ctrl_view = ordenar_hp_cols(ctrl_view)
+                ctrl_view = ordenar_cols_reporte(ctrl_view, "control")
 
                 st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL y DE POR VIDA)")
                 st.dataframe(ctrl_view, use_container_width=True)
@@ -854,9 +856,9 @@ with tab2:
                 buf = BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                     if 'per_view' in locals() and not per_view.empty:
-                        ordenar_hp_cols(per_view).to_excel(writer, index=False, sheet_name="Personas")
+                        ordenar_cols_reporte(per_view, "personas").to_excel(writer, index=False, sheet_name="Personas")
                     if 'ctrl_view' in locals() and not ctrl_view.empty:
-                        ordenar_hp_cols(ctrl_view).to_excel(writer, index=False, sheet_name="Control")
+                        ordenar_cols_reporte(ctrl_view, "control").to_excel(writer, index=False, sheet_name="Control")
                     st.session_state["df_final_vista"].to_excel(writer, index=False, sheet_name="Detalle")
                 st.download_button(
                     label="📥 Descargar Reporte (Excel)",
@@ -864,4 +866,3 @@ with tab2:
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-
