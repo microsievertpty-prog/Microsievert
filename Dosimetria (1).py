@@ -111,6 +111,20 @@ def periodo_to_date(s: str):
     except Exception:
         return pd.NaT
 
+# ===== Orden de columnas pedido =====
+def ordenar_hp_cols(df: pd.DataFrame) -> pd.DataFrame:
+    orden = [
+        "Hp (10)", "Hp (0.07)", "Hp (3)",
+        "Hp (10) ANUAL", "Hp (0.07) ANUAL", "Hp (3) ANUAL",
+        "Hp (10) DE POR VIDA", "Hp (0.07) DE POR VIDA", "Hp (3) DE POR VIDA",
+    ]
+    front = [c for c in orden if c in df.columns]
+    tail  = [c for c in df.columns if c not in front]
+    try:
+        return df[front + tail]
+    except Exception:
+        return df
+
 # ===================== Ninox helpers =====================
 def ninox_headers():
     return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
@@ -379,7 +393,7 @@ def aplicar_resta_control_y_formato(
     df_ctrl = df[is_control].copy()
     df_per  = df[~is_control].copy()
 
-    # Si NO hay control y hay control manual → aplicarlo (igual a las 3 Hp)
+    # Si NO hay control y hay control manual → aplicarlo
     if df_ctrl.empty:
         out = df_per.copy()
         if (manual_ctrl is not None) and (float(manual_ctrl) > 0):
@@ -522,7 +536,7 @@ with tab1:
     upl_dosis = st.file_uploader("Selecciona CSV/XLS/XLSX (dosis)", type=["csv","xls","xlsx"], key="upl_dosis")
     df_dosis = leer_dosis(upl_dosis) if upl_dosis else None
     if df_dosis is not None and not df_dosis.empty:
-        st.success(f"Dosis cargadas: {len[df_dosis]} fila(s)")  # mensaje simple
+        st.success(f"Dosis cargadas: {len(df_dosis)} fila(s)")
         st.dataframe(df_dosis.head(15), use_container_width=True)
 
     per_options = sorted(df_lista["PERIODO DE LECTURA"].dropna().astype(str).str.upper().unique().tolist()) if df_lista is not None else []
@@ -617,6 +631,7 @@ with tab1:
 
                 if res.get("ok"):
                     st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s).")
+                    # hint: podrías limpiar session_state si quieres
                 else:
                     st.error(f"❌ Error al subir: {res.get('error')}")
 
@@ -685,13 +700,14 @@ with tab2:
                     per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
                     per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
                     per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
-                    # Formato final
+                    # Formato final + orden
                     for c in ["Hp (10)","Hp (0.07)","Hp (3)",
                               "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         per_view[c] = per_view[c].map(pmfmt)
+                    per_view = ordenar_hp_cols(per_view)
 
-                    st.markdown("### Personas — por **CÓDIGO DE USUARIO** (último periodo + ANUAL = VIDA)")
+                    st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL y DE POR VIDA)")
                     st.dataframe(per_view, use_container_width=True)
                 else:
                     st.info("No hay filas de personas (Ninox).")
@@ -724,8 +740,9 @@ with tab2:
                               "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                         ctrl_view[c] = ctrl_view[c].map(pmfmt)
+                    ctrl_view = ordenar_hp_cols(ctrl_view)
 
-                    st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (último periodo + ANUAL = VIDA)")
+                    st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL y DE POR VIDA)")
                     st.dataframe(ctrl_view, use_container_width=True)
                 else:
                     st.info("No hay filas de CONTROL (Ninox).")
@@ -735,9 +752,9 @@ with tab2:
                     buf = BytesIO()
                     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                         if 'per_view' in locals() and not per_view.empty:
-                            per_view.to_excel(writer, index=False, sheet_name="Personas")
+                            ordenar_hp_cols(per_view).to_excel(writer, index=False, sheet_name="Personas")
                         if 'ctrl_view' in locals() and not ctrl_view.empty:
-                            ctrl_view.to_excel(writer, index=False, sheet_name="Control")
+                            ordenar_hp_cols(ctrl_view).to_excel(writer, index=False, sheet_name="Control")
                         df_nx.to_excel(writer, index=False, sheet_name="Detalle")
                     st.download_button(
                         label="📥 Descargar Reporte (Excel)",
@@ -783,8 +800,9 @@ with tab2:
                           "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                           "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                     per_view[c] = per_view[c].map(pmfmt)
+                per_view = ordenar_hp_cols(per_view)
 
-                st.markdown("### Personas — por **CÓDIGO DE USUARIO** (último periodo + ANUAL = VIDA)")
+                st.markdown("### Personas — por **CÓDIGO DE USUARIO** (ANUAL y DE POR VIDA)")
                 st.dataframe(per_view, use_container_width=True)
             else:
                 st.info("No hay filas de personas.")
@@ -824,8 +842,9 @@ with tab2:
                           "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                           "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
                     ctrl_view[c] = ctrl_view[c].map(pmfmt)
+                ctrl_view = ordenar_hp_cols(ctrl_view)
 
-                st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (último periodo + ANUAL = VIDA)")
+                st.markdown("### CONTROL — por **CÓDIGO DE DOSÍMETRO** (ANUAL y DE POR VIDA)")
                 st.dataframe(ctrl_view, use_container_width=True)
             else:
                 st.info("No hay filas de CONTROL en la sesión.")
@@ -835,9 +854,9 @@ with tab2:
                 buf = BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                     if 'per_view' in locals() and not per_view.empty:
-                        per_view.to_excel(writer, index=False, sheet_name="Personas")
+                        ordenar_hp_cols(per_view).to_excel(writer, index=False, sheet_name="Personas")
                     if 'ctrl_view' in locals() and not ctrl_view.empty:
-                        ctrl_view.to_excel(writer, index=False, sheet_name="Control")
+                        ordenar_hp_cols(ctrl_view).to_excel(writer, index=False, sheet_name="Control")
                     st.session_state["df_final_vista"].to_excel(writer, index=False, sheet_name="Detalle")
                 st.download_button(
                     label="📥 Descargar Reporte (Excel)",
