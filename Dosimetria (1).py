@@ -14,7 +14,6 @@ API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"
 TEAM_ID     = "YrsYfTegptdZcHJEj"
 DATABASE_ID = "ow1geqnkz00e"
 BASE_URL    = "https://api.ninox.com/v1"
-
 TABLE_WRITE_NAME = "BASE DE DATOS"  # escritura en Ninox
 
 # ===================== UI =====================
@@ -26,7 +25,7 @@ def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 def canon_user_code(x: str) -> str:
-    """Canoniza el CÓDIGO DE USUARIO para agrupar (ej. ' 001-188 ' → '188')."""
+    """Canoniza el CÓDIGO DE USUARIO (ej. ' 001-188 ' → '188')."""
     s = str(x or "").upper().strip()
     s = re.sub(r"\s+", "", s)
     digits = re.sub(r"\D", "", s)
@@ -42,7 +41,7 @@ def pmfmt(v, thr: float = 0.005) -> str:
     return "PM" if f < thr else f"{f:.2f}"
 
 def hp_to_num(x) -> float:
-    """Convierte valores Hp provenientes de texto/PM a número para sumar."""
+    """Convierte PM/str a número para sumar."""
     if x is None:
         return 0.0
     s = str(x).strip().upper()
@@ -97,7 +96,7 @@ def normalizar_periodo(valor: str) -> str:
 
 MES_A_NUM = {"ENERO":1,"FEBRERO":2,"MARZO":3,"ABRIL":4,"MAYO":5,"JUNIO":6,"JULIO":7,"AGOSTO":8,"SEPTIEMBRE":9,"OCTUBRE":10,"NOVIEMBRE":11,"DICIEMBRE":12}
 def periodo_to_date(s: str):
-    """Convierte 'AGOSTO 2025' a fecha (2025-08-01) para ordenar."""
+    """Convierte 'AGOSTO 2025' a 2025-08-01 para ordenar por último periodo."""
     if not s or not isinstance(s, str):
         return pd.NaT
     s = s.strip().upper()
@@ -111,7 +110,7 @@ def periodo_to_date(s: str):
     except Exception:
         return pd.NaT
 
-# ===== Orden de columnas pedido =====
+# ===== Orden de columnas para las tablas/Excel =====
 def ordenar_cols_reporte(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     base_personas = ["CÓDIGO DE USUARIO", "CLIENTE", "NOMBRE", "CÉDULA"]
     base_control  = ["CÓDIGO DE DOSÍMETRO", "CLIENTE"]
@@ -127,6 +126,43 @@ def ordenar_cols_reporte(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
         return df[frente + cola]
     except Exception:
         return df
+
+# ===== Bloque informativo (como en tu PDF) =====
+def render_info_box():
+    st.markdown(
+        """
+**MICROSIEVERT, S.A.**  
+PH Conardo — Calle 41 Este, Panamá — **PANAMÁ**
+
+### REPORTE DE DOSIMETRÍA
+
+**DOSIS EN MILISIEVERT (mSv)**  
+- **Hp(10)**: Dosis efectiva (prof. 10 mm, tejido blando).  
+- **Hp(0.07)**: Dosis equivalente superficial (prof. 0.07 mm).  
+- **Hp(3)**: Dosis equivalente a cristalino (prof. 3 mm).
+
+**Información del reporte**  
+- **Periodo de lectura**: Periodo de uso del dosímetro personal.  
+- **Fecha de lectura**: Fecha en que se realizó la lectura del dosímetro.  
+- **Tipo de dosímetro**:  
+  - **CE** = Cuerpo Entero, **A** = Anillo, **B** = Brazalete, **CR** = Cristalino  
+- **Datos del participante**: Código de usuario, Nombre, Cédula, Fecha de nacimiento (si aplica).  
+- **Lecturas de anillo**: registradas como **Hp(0.07)**.  
+- **PM**: Por debajo del mínimo detectado para el periodo.
+
+**Dosis acumuladas**  
+- **Dosis actual**: Acumulada durante el periodo.  
+- **Dosis anual**: Desde el inicio del año.  
+- **Dosis de por vida**: Desde el inicio del servicio.
+
+**Límites anuales de exposición**  
+- Cuerpo Entero: **20 mSv/año**  
+- Cristalino: **150 mSv/año**  
+- Extremidades y piel: **500 mSv/año**  
+- Fetal: **1 mSv/gestación**  
+- Público: **1 mSv/año**
+        """.strip()
+    )
 
 # ===================== Ninox helpers =====================
 def ninox_headers():
@@ -164,7 +200,7 @@ def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
-    """Trae todos los registros (paginado)."""
+    """Trae registros de una tabla (paginado)."""
     table_id = resolve_table_id(table_hint)
     url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
     out: List[Dict[str, Any]] = []
@@ -183,7 +219,7 @@ def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
     return out
 
 def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
-    """Aplana 'fields' → DataFrame."""
+    """Aplana 'fields' → DataFrame estándar."""
     if not records:
         return pd.DataFrame()
     rows = []
@@ -227,6 +263,7 @@ def parse_csv_robust(upload) -> pd.DataFrame:
         raise
 
 def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
+    """Lee LISTA DE CÓDIGO desde CSV/XLS/XLSX; detecta hoja 'asignar_DOSÍMETRO...' o primera."""
     if not upload: return None
     name = upload.name.lower()
     if name.endswith((".xlsx", ".xls")):
@@ -328,6 +365,7 @@ def construir_registros(df_lista: pd.DataFrame,
     idx = df_dosis.set_index("dosimeter") if "dosimeter" in df_dosis.columns else pd.DataFrame().set_index(pd.Index([]))
 
     registros: List[Dict[str, Any]] = []
+    # Control primero
     df_l = pd.concat([df_l[df_l["_IS_CONTROL"]], df_l[~df_l["_IS_CONTROL"]]], ignore_index=True)
 
     for _, r in df_l.iterrows():
@@ -374,10 +412,10 @@ def construir_registros(df_lista: pd.DataFrame,
 def aplicar_resta_control_y_formato(
     df_final: pd.DataFrame,
     umbral_pm: float = 0.005,
-    manual_ctrl: Optional[float] = None,  # si no hay CONTROL y activas opción
+    manual_ctrl: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Devuelve:
-       - df_vista: Hp visibles (PM/0.00) ya restadas
+       - df_vista: Hp visibles (PM/xx.xx) ya restadas
        - df_num  : Hp numéricas restadas (_Hp10_NUM/_Hp007_NUM/_Hp3_NUM) + metadatos
     """
     if df_final is None or df_final.empty:
@@ -474,14 +512,17 @@ def aplicar_resta_control_y_formato(
                   "TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
     return df_vista, df_num
 
-# ===================== Consolidación para subir a Ninox =====================
+# ===================== Consolidación para subir a Ninox (FIX KeyError) =====================
 def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
-    """Evita duplicados por periodo/usuario, preserva CONTROL promedio por periodo."""
+    """Consolida para subir a Ninox. Tolerante a ausencia de personas/controles.
+       Evita duplicados por periodo/usuario; CONTROL promediado por periodo.
+    """
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
 
+    # PERSONAS (numérico para sumas por periodo+usuario)
     personas_num = df_num[df_num["NOMBRE"].astype(str).str.strip().str.upper() != "CONTROL"].copy()
-    if "CÓDIGO DE USUARIO" in personas_num.columns:
+    if not personas_num.empty and "CÓDIGO DE USUARIO" in personas_num.columns:
         personas_num["CÓDIGO DE USUARIO"] = personas_num["CÓDIGO DE USUARIO"].map(canon_user_code)
 
     per_consol = pd.DataFrame()
@@ -492,8 +533,9 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
             "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
         }).rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"})
 
-    control_v = df_vista[df_vista["NOMBRE"].astype(str).str.strip().str.upper() == "CONTROL"].copy()
+    # CONTROL (desde df_vista; convertir a número para promediar)
     ctrl_consol = pd.DataFrame()
+    control_v = df_vista[df_vista["NOMBRE"].astype(str).str.strip().str.upper() == "CONTROL"].copy()
     if not control_v.empty:
         for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
             control_v[h] = pd.to_numeric(control_v[h], errors="coerce").fillna(0.0)
@@ -505,20 +547,38 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
         ctrl_consol["CÓDIGO DE USUARIO"] = ""
         ctrl_consol["CÉDULA"] = "CONTROL"
 
+    # Unión
     out = pd.concat([ctrl_consol, per_consol], ignore_index=True, sort=False)
-    if out.empty: 
+    if out.empty:
         return out
 
-    def fmt(v: float) -> str:
+    # Asegura columnas clave
+    for col in ["PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO",
+                "NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
+                "Hp (10)","Hp (0.07)","Hp (3)"]:
+        if col not in out.columns:
+            out[col] = "" if col not in ["Hp (10)","Hp (0.07)","Hp (3)"] else 0.0
+
+    # Formato PM/2 decimales
+    def _fmt(v: float) -> str:
         v = float(v or 0.0)
         return "PM" if v < umbral_pm else f"{v:.2f}"
     for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-        if h in out.columns: out[h] = out[h].map(fmt)
+        out[h] = out[h].map(_fmt)
 
-    orden = ["PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE",
-             "CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO","Hp (10)","Hp (0.07)","Hp (3)"]
-    cols = [c for c in orden if c in out.columns] + [c for c in out.columns if c not in orden]
-    out = out[cols].sort_values(["PERIODO DE LECTURA","NOMBRE","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO"]).reset_index(drop=True)
+    # Orden de columnas dinámico
+    orden_pref = ["PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE",
+                  "CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO","Hp (10)","Hp (0.07)","Hp (3)"]
+    cols = [c for c in orden_pref if c in out.columns] + [c for c in out.columns if c not in orden_pref]
+    out = out[cols]
+
+    # Ordenamiento seguro (solo por columnas presentes)
+    sort_keys = [c for c in ["PERIODO DE LECTURA","NOMBRE","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO"] if c in out.columns]
+    if sort_keys:
+        out = out.sort_values(sort_keys).reset_index(drop=True)
+    else:
+        out = out.reset_index(drop=True)
+
     return out
 
 # ===================== TABS =====================
@@ -593,7 +653,7 @@ with tab1:
         return str(v)
 
     def _hp_value_for_upload(v, as_text_pm=True):
-        """Con PM→'PM' si as_text_pm, de lo contrario None; valores con 2 decimales."""
+        """PM→'PM' si as_text_pm; si no, None. Números con 2 decimales si as_text_pm=True."""
         if isinstance(v, str) and v.strip().upper() == "PM":
             return "PM" if as_text_pm else None
         try:
@@ -640,6 +700,7 @@ with tab1:
 # ------------------ TAB 2 ------------------
 with tab2:
     st.subheader("📊 Reporte Final (ANUAL y DE POR VIDA)")
+    render_info_box()  # texto y definiciones como en el PDF
 
     fuente = st.radio("Fuente de datos para el reporte:", [
         "Usar datos procesados en esta sesión",
@@ -660,7 +721,6 @@ with tab2:
                 st.warning("No se recibieron registros desde Ninox.")
             else:
                 df_nx = df_nx_all.copy()
-                # Filtros
                 per_opts = sorted(df_nx["PERIODO DE LECTURA"].dropna().astype(str).unique().tolist()) if "PERIODO DE LECTURA" in df_nx.columns else []
                 cli_opts = sorted(df_nx["CLIENTE"].dropna().astype(str).unique().tolist()) if "CLIENTE" in df_nx.columns else []
 
@@ -673,7 +733,6 @@ with tab2:
                 if per_sel: df_nx = df_nx[df_nx["PERIODO DE LECTURA"].isin(per_sel)]
                 if cli_sel: df_nx = df_nx[df_nx["CLIENTE"].isin(cli_sel)]
 
-                # A número (PM→0) para sumar
                 for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
                     if h in df_nx.columns: df_nx[h] = df_nx[h].apply(hp_to_num)
 
@@ -687,7 +746,6 @@ with tab2:
                     }).rename(columns={
                         "Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"
                     })
-                    # Último periodo (para columnas base)
                     personas["__fecha__"] = personas["PERIODO DE LECTURA"].map(periodo_to_date)
                     idx_last = personas.groupby("CÓDIGO DE USUARIO")["__fecha__"].idxmax()
                     per_last = (personas.loc[idx_last, ["CÓDIGO DE USUARIO","Hp (10)","Hp (0.07)","Hp (3)"]]
@@ -696,13 +754,10 @@ with tab2:
                     per_view["Hp (10)"]   = per_view["Hp (10) LAST"]
                     per_view["Hp (0.07)"] = per_view["Hp (0.07) LAST"]
                     per_view["Hp (3)"]    = per_view["Hp (3) LAST"]
-                    # quitar columnas auxiliares LAST
                     per_view.drop(columns=["Hp (10) LAST","Hp (0.07) LAST","Hp (3) LAST"], errors="ignore", inplace=True)
-                    # VIDA = ANUAL
                     per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
                     per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
                     per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
-                    # Formato final + orden
                     for c in ["Hp (10)","Hp (0.07)","Hp (3)",
                               "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                               "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
@@ -749,7 +804,7 @@ with tab2:
                 else:
                     st.info("No hay filas de CONTROL (Ninox).")
 
-                # Excel
+                # Excel (Ninox) + hoja Leyenda
                 if (('per_view' in locals() and not per_view.empty) or ('ctrl_view' in locals() and not ctrl_view.empty)):
                     buf = BytesIO()
                     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -758,6 +813,43 @@ with tab2:
                         if 'ctrl_view' in locals() and not ctrl_view.empty:
                             ordenar_cols_reporte(ctrl_view, "control").to_excel(writer, index=False, sheet_name="Control")
                         df_nx.to_excel(writer, index=False, sheet_name="Detalle")
+
+                        # Hoja Leyenda
+                        leyenda_rows = [
+                            ["MICROSIEVERT, S.A."],
+                            ["PH Conardo — Calle 41 Este, Panamá — PANAMÁ"],
+                            [],
+                            ["REPORTE DE DOSIMETRÍA"],
+                            [],
+                            ["DOSIS EN MILISIEVERT (mSv)"],
+                            ["- Hp(10): Dosis efectiva (prof. 10 mm, tejido blando)."],
+                            ["- Hp(0.07): Dosis equivalente superficial (prof. 0.07 mm)."],
+                            ["- Hp(3): Dosis equivalente a cristalino (prof. 3 mm)."],
+                            [],
+                            ["Información del reporte"],
+                            ["- Periodo de lectura: Periodo de uso del dosímetro personal."],
+                            ["- Fecha de lectura: Fecha en que se realizó la lectura del dosímetro."],
+                            ["- Tipo de dosímetro: CE=Cuerpo Entero; A=Anillo; B=Brazalete; CR=Cristalino."],
+                            ["- Datos del participante: Código de usuario; Nombre; Cédula; Fecha de nacimiento."],
+                            ["- Lecturas de anillo: registradas como Hp(0.07)."],
+                            ["- PM: Por debajo del mínimo detectado para el periodo."],
+                            [],
+                            ["Dosis acumuladas"],
+                            ["- Dosis actual: acumulada durante el periodo de lectura."],
+                            ["- Dosis anual: acumulada desde el inicio del año."],
+                            ["- Dosis de por vida: acumulada desde el inicio del servicio."],
+                            [],
+                            ["Límites anuales de exposición"],
+                            ["- Cuerpo Entero: 20 mSv/año"],
+                            ["- Cristalino: 150 mSv/año"],
+                            ["- Extremidades y piel: 500 mSv/año"],
+                            ["- Fetal: 1 mSv/gestación"],
+                            ["- Público: 1 mSv/año"],
+                        ]
+                        pd.DataFrame(leyenda_rows).to_excel(writer, index=False, header=False, sheet_name="Leyenda")
+                        ws = writer.sheets["Leyenda"]
+                        ws.column_dimensions["A"].width = 95
+
                     st.download_button(
                         label="📥 Descargar Reporte (Excel)",
                         data=buf.getvalue(),
@@ -772,7 +864,7 @@ with tab2:
         if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
             st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
         else:
-            # PERSONAS (usar num para sumas; último periodo para columnas base)
+            # PERSONAS (sumas + último periodo como "actual")
             personas = df_num[df_num["NOMBRE"].astype(str).str.upper() != "CONTROL"].copy()
             for c in ["CÓDIGO DE USUARIO","CLIENTE","NOMBRE","CÉDULA","TIPO DE DOSÍMETRO"]:
                 if c in personas.columns: personas[c] = personas[c].astype(str).str.strip()
@@ -851,7 +943,7 @@ with tab2:
             else:
                 st.info("No hay filas de CONTROL en la sesión.")
 
-            # Excel (sesión)
+            # Excel (sesión) + hoja Leyenda
             if (('per_view' in locals() and not per_view.empty) or ('ctrl_view' in locals() and not ctrl_view.empty)):
                 buf = BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -860,9 +952,46 @@ with tab2:
                     if 'ctrl_view' in locals() and not ctrl_view.empty:
                         ordenar_cols_reporte(ctrl_view, "control").to_excel(writer, index=False, sheet_name="Control")
                     st.session_state["df_final_vista"].to_excel(writer, index=False, sheet_name="Detalle")
+
+                    leyenda_rows = [
+                        ["MICROSIEVERT, S.A."],
+                        ["PH Conardo — Calle 41 Este, Panamá — PANAMÁ"],
+                        [],
+                        ["REPORTE DE DOSIMETRÍA"],
+                        [],
+                        ["DOSIS EN MILISIEVERT (mSv)"],
+                        ["- Hp(10): Dosis efectiva (prof. 10 mm, tejido blando)."],
+                        ["- Hp(0.07): Dosis equivalente superficial (prof. 0.07 mm)."],
+                        ["- Hp(3): Dosis equivalente a cristalino (prof. 3 mm)."],
+                        [],
+                        ["Información del reporte"],
+                        ["- Periodo de lectura: Periodo de uso del dosímetro personal."],
+                        ["- Fecha de lectura: Fecha en que se realizó la lectura del dosímetro."],
+                        ["- Tipo de dosímetro: CE=Cuerpo Entero; A=Anillo; B=Brazalete; CR=Cristalino."],
+                        ["- Datos del participante: Código de usuario; Nombre; Cédula; Fecha de nacimiento."],
+                        ["- Lecturas de anillo: registradas como Hp(0.07)."],
+                        ["- PM: Por debajo del mínimo detectado para el periodo."],
+                        [],
+                        ["Dosis acumuladas"],
+                        ["- Dosis actual: acumulada durante el periodo de lectura."],
+                        ["- Dosis anual: acumulada desde el inicio del año."],
+                        ["- Dosis de por vida: acumulada desde el inicio del servicio."],
+                        [],
+                        ["Límites anuales de exposición"],
+                        ["- Cuerpo Entero: 20 mSv/año"],
+                        ["- Cristalino: 150 mSv/año"],
+                        ["- Extremidades y piel: 500 mSv/año"],
+                        ["- Fetal: 1 mSv/gestación"],
+                        ["- Público: 1 mSv/año"],
+                    ]
+                    pd.DataFrame(leyenda_rows).to_excel(writer, index=False, header=False, sheet_name="Leyenda")
+                    ws = writer.sheets["Leyenda"]
+                    ws.column_dimensions["A"].width = 95
+
                 st.download_button(
                     label="📥 Descargar Reporte (Excel)",
                     data=buf.getvalue(),
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+
