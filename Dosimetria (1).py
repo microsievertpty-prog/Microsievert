@@ -127,7 +127,7 @@ def ordenar_cols_reporte(df: pd.DataFrame, tipo: str) -> pd.DataFrame:
     except Exception:
         return df
 
-# ===== Bloque informativo (como en tu PDF) =====
+# ===== Bloque informativo =====
 def render_info_box():
     st.markdown(
         """
@@ -146,14 +146,12 @@ PH Conardo — Calle 41 Este, Panamá — **PANAMÁ**
 - **Fecha de lectura**: Fecha en que se realizó la lectura del dosímetro.  
 - **Tipo de dosímetro**:  
   - **CE** = Cuerpo Entero, **A** = Anillo, **B** = Brazalete, **CR** = Cristalino  
-- **Datos del participante**: Código de usuario, Nombre, Cédula, Fecha de nacimiento (si aplica).  
-- **Lecturas de anillo**: registradas como **Hp(0.07)**.  
 - **PM**: Por debajo del mínimo detectado para el periodo.
 
 **Dosis acumuladas**  
-- **Dosis actual**: Acumulada durante el periodo.  
-- **Dosis anual**: Desde el inicio del año.  
-- **Dosis de por vida**: Desde el inicio del servicio.
+- **Actual**: del último periodo.  
+- **Anual**: suma del año.  
+- **De por vida**: igual a la Anual en este flujo.
 
 **Límites anuales de exposición**  
 - Cuerpo Entero: **20 mSv/año**  
@@ -370,7 +368,7 @@ def construir_registros(df_lista: pd.DataFrame,
 
     for _, r in df_l.iterrows():
         cod = str(r["CÓDIGO_DOSÍMETRO"]).strip().upper()
-        if not cod or cod == "NAN": 
+        if not cod or cod == "NAN":
             continue
         if cod not in idx.index:
             continue
@@ -512,7 +510,7 @@ def aplicar_resta_control_y_formato(
                   "TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
     return df_vista, df_num
 
-# ===================== Consolidación para subir a Ninox (FIX KeyError) =====================
+# ===================== Consolidación para subir a Ninox (incluye CÓDIGO DE DOSÍMETRO) =====================
 def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
     """Consolida para subir a Ninox. Tolerante a ausencia de personas/controles.
        Evita duplicados por periodo/usuario; CONTROL promediado por periodo.
@@ -528,10 +526,20 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
     per_consol = pd.DataFrame()
     if not personas_num.empty:
         per_consol = personas_num.groupby(["PERIODO DE LECTURA","CÓDIGO DE USUARIO"], as_index=False).agg({
-            "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
-            "TIPO DE DOSÍMETRO":"last","FECHA DE LECTURA":"last",
-            "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
-        }).rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"})
+            "CLIENTE":"last",
+            "NOMBRE":"last",
+            "CÉDULA":"last",
+            "CÓDIGO DE DOSÍMETRO":"last",   # <- conservar el código de dosímetro
+            "TIPO DE DOSÍMETRO":"last",
+            "FECHA DE LECTURA":"last",
+            "_Hp10_NUM":"sum",
+            "_Hp007_NUM":"sum",
+            "_Hp3_NUM":"sum"
+        }).rename(columns={
+            "_Hp10_NUM":"Hp (10)",
+            "_Hp007_NUM":"Hp (0.07)",
+            "_Hp3_NUM":"Hp (3)"
+        })
 
     # CONTROL (desde df_vista; convertir a número para promediar)
     ctrl_consol = pd.DataFrame()
@@ -540,8 +548,13 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
         for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
             control_v[h] = pd.to_numeric(control_v[h], errors="coerce").fillna(0.0)
         ctrl_consol = control_v.groupby(["PERIODO DE LECTURA"], as_index=False).agg({
-            "CLIENTE":"last","CÓDIGO DE DOSÍMETRO":"first","TIPO DE DOSÍMETRO":"last","FECHA DE LECTURA":"last",
-            "Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"
+            "CLIENTE":"last",
+            "CÓDIGO DE DOSÍMETRO":"first",
+            "TIPO DE DOSÍMETRO":"last",
+            "FECHA DE LECTURA":"last",
+            "Hp (10)":"mean",
+            "Hp (0.07)":"mean",
+            "Hp (3)":"mean"
         })
         ctrl_consol["NOMBRE"] = "CONTROL"
         ctrl_consol["CÓDIGO DE USUARIO"] = ""
@@ -566,13 +579,12 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
     for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
         out[h] = out[h].map(_fmt)
 
-    # Orden de columnas dinámico
+    # Orden de columnas y sort seguros
     orden_pref = ["PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE",
                   "CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO","Hp (10)","Hp (0.07)","Hp (3)"]
     cols = [c for c in orden_pref if c in out.columns] + [c for c in out.columns if c not in orden_pref]
     out = out[cols]
 
-    # Ordenamiento seguro (solo por columnas presentes)
     sort_keys = [c for c in ["PERIODO DE LECTURA","NOMBRE","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO"] if c in out.columns]
     if sort_keys:
         out = out.sort_values(sort_keys).reset_index(drop=True)
@@ -700,7 +712,7 @@ with tab1:
 # ------------------ TAB 2 ------------------
 with tab2:
     st.subheader("📊 Reporte Final (ANUAL y DE POR VIDA)")
-    render_info_box()  # texto y definiciones como en el PDF
+    render_info_box()
 
     fuente = st.radio("Fuente de datos para el reporte:", [
         "Usar datos procesados en esta sesión",
@@ -830,21 +842,10 @@ with tab2:
                             ["- Periodo de lectura: Periodo de uso del dosímetro personal."],
                             ["- Fecha de lectura: Fecha en que se realizó la lectura del dosímetro."],
                             ["- Tipo de dosímetro: CE=Cuerpo Entero; A=Anillo; B=Brazalete; CR=Cristalino."],
-                            ["- Datos del participante: Código de usuario; Nombre; Cédula; Fecha de nacimiento."],
-                            ["- Lecturas de anillo: registradas como Hp(0.07)."],
                             ["- PM: Por debajo del mínimo detectado para el periodo."],
                             [],
                             ["Dosis acumuladas"],
-                            ["- Dosis actual: acumulada durante el periodo de lectura."],
-                            ["- Dosis anual: acumulada desde el inicio del año."],
-                            ["- Dosis de por vida: acumulada desde el inicio del servicio."],
-                            [],
-                            ["Límites anuales de exposición"],
-                            ["- Cuerpo Entero: 20 mSv/año"],
-                            ["- Cristalino: 150 mSv/año"],
-                            ["- Extremidades y piel: 500 mSv/año"],
-                            ["- Fetal: 1 mSv/gestación"],
-                            ["- Público: 1 mSv/año"],
+                            ["- Actual / Anual / De por vida"],
                         ]
                         pd.DataFrame(leyenda_rows).to_excel(writer, index=False, header=False, sheet_name="Leyenda")
                         ws = writer.sheets["Leyenda"]
@@ -965,24 +966,9 @@ with tab2:
                         ["- Hp(3): Dosis equivalente a cristalino (prof. 3 mm)."],
                         [],
                         ["Información del reporte"],
-                        ["- Periodo de lectura: Periodo de uso del dosímetro personal."],
-                        ["- Fecha de lectura: Fecha en que se realizó la lectura del dosímetro."],
-                        ["- Tipo de dosímetro: CE=Cuerpo Entero; A=Anillo; B=Brazalete; CR=Cristalino."],
-                        ["- Datos del participante: Código de usuario; Nombre; Cédula; Fecha de nacimiento."],
-                        ["- Lecturas de anillo: registradas como Hp(0.07)."],
-                        ["- PM: Por debajo del mínimo detectado para el periodo."],
+                        ["- Periodo de lectura / Fecha / Tipo / PM."],
                         [],
-                        ["Dosis acumuladas"],
-                        ["- Dosis actual: acumulada durante el periodo de lectura."],
-                        ["- Dosis anual: acumulada desde el inicio del año."],
-                        ["- Dosis de por vida: acumulada desde el inicio del servicio."],
-                        [],
-                        ["Límites anuales de exposición"],
-                        ["- Cuerpo Entero: 20 mSv/año"],
-                        ["- Cristalino: 150 mSv/año"],
-                        ["- Extremidades y piel: 500 mSv/año"],
-                        ["- Fetal: 1 mSv/gestación"],
-                        ["- Público: 1 mSv/año"],
+                        ["Dosis acumuladas: Actual, Anual y De por vida"],
                     ]
                     pd.DataFrame(leyenda_rows).to_excel(writer, index=False, header=False, sheet_name="Leyenda")
                     ws = writer.sheets["Leyenda"]
