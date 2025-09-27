@@ -415,6 +415,7 @@ def aplicar_resta_control_y_formato(
     """Devuelve:
        - df_vista: Hp visibles (PM/xx.xx) ya restadas
        - df_num  : Hp numéricas restadas (_Hp10_NUM/_Hp007_NUM/_Hp3_NUM) + metadatos
+       También resta el control a las filas donde NOMBRE = CONTROL.
     """
     if df_final is None or df_final.empty:
         return df_final, df_final
@@ -428,11 +429,11 @@ def aplicar_resta_control_y_formato(
             df[h] = 0.0
         df[h] = pd.to_numeric(df[h], errors="coerce").fillna(0.0)
 
-    is_control = df["_IS_CONTROL"].astype(bool) if "_IS_CONTROL" in df.columns else df["NOMBRE"].astype(str).str.strip().str.upper().eq("CONTROL")
+    is_control = df["NOMBRE"].astype(str).str.strip().str.upper().eq("CONTROL")
     df_ctrl = df[is_control].copy()
     df_per  = df[~is_control].copy()
 
-    # Si NO hay control y hay control manual → aplicarlo
+    # --- Sin CONTROL registrado: aplicar control manual si está habilitado ---
     if df_ctrl.empty:
         out = df_per.copy()
         if (manual_ctrl is not None) and (float(manual_ctrl) > 0):
@@ -456,13 +457,14 @@ def aplicar_resta_control_y_formato(
                         "TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
         return df_vista, df_num
 
-    # Hay CONTROL → 3 niveles
+    # --- Con CONTROL: calcular promedios y restar (personas y también CONTROL) ---
     def agg_ctrl(g):
         return g.agg({"Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"})
     ctrl_lvl3 = df_ctrl.groupby(["PERIODO DE LECTURA","CLIENTE","TIPO DE DOSÍMETRO"], as_index=False).apply(agg_ctrl)
     ctrl_lvl2 = df_ctrl.groupby(["PERIODO DE LECTURA","CLIENTE"], as_index=False).apply(agg_ctrl)
     ctrl_lvl1 = df_ctrl.groupby(["PERIODO DE LECTURA"], as_index=False).apply(agg_ctrl)
 
+    # --- Personas ---
     out = df_per.copy()
     for lvl, keys in [
         (ctrl_lvl3, ["PERIODO DE LECTURA","CLIENTE","TIPO DE DOSÍMETRO"]),
@@ -496,15 +498,23 @@ def aplicar_resta_control_y_formato(
     out_view["Hp (0.07)"] = out_view["_Hp007_NUM"].map(fmt)
     out_view["Hp (3)"]    = out_view["_Hp3_NUM"].map(fmt)
 
-    df_ctrl_view = df_ctrl.copy()
-    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-        df_ctrl_view[h] = df_ctrl_view[h].map(lambda x: f"{float(x):.2f}")
+    # --- CONTROL: también restar contra su propio promedio de control del periodo ---
+    ctrl_means = df_ctrl.groupby(["PERIODO DE LECTURA"], as_index=False).agg({
+        "Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"
+    }).rename(columns={"Hp (10)":"Hp10_CTRL","Hp (0.07)":"Hp007_CTRL","Hp (3)":"Hp3_CTRL"})
+    df_ctrl_adj = df_ctrl.merge(ctrl_means, on="PERIODO DE LECTURA", how="left")
+    df_ctrl_adj["Hp (10)"]   = (df_ctrl_adj["Hp (10)"]   - df_ctrl_adj["Hp10_CTRL"]).clip(lower=0.0).map(fmt)
+    df_ctrl_adj["Hp (0.07)"] = (df_ctrl_adj["Hp (0.07)"] - df_ctrl_adj["Hp007_CTRL"]).clip(lower=0.0).map(fmt)
+    df_ctrl_adj["Hp (3)"]    = (df_ctrl_adj["Hp (3)"]    - df_ctrl_adj["Hp3_CTRL"]).clip(lower=0.0).map(fmt)
 
-    df_vista = pd.concat([df_ctrl_view, out_view], ignore_index=True)
+    # Resultado visible: CONTROL (ya restado) + PERSONAS (restadas)
+    df_vista = pd.concat([df_ctrl_adj.drop(columns=["Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"], errors="ignore"),
+                          out_view], ignore_index=True)
     df_vista = df_vista.sort_values(by=["NOMBRE","CÉDULA"], ascending=[True, True]) \
                        .sort_values(by="NOMBRE", key=lambda s: s.str.upper().ne("CONTROL")) \
                        .reset_index(drop=True)
 
+    # Resultado numérico solo para personas (para sumas)
     df_num = out[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
                   "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
                   "TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
@@ -512,13 +522,11 @@ def aplicar_resta_control_y_formato(
 
 # ===================== Consolidación para subir a Ninox (incluye CÓDIGO DE DOSÍMETRO) =====================
 def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
-    """Consolida para subir a Ninox. Tolerante a ausencia de personas/controles.
-       Evita duplicados por periodo/usuario; CONTROL promediado por periodo.
-    """
+    """Consolida para subir a Ninox. Evita duplicados por periodo/usuario; CONTROL promediado por periodo."""
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
 
-    # PERSONAS (numérico para sumas por periodo+usuario)
+    # PERSONAS
     personas_num = df_num[df_num["NOMBRE"].astype(str).str.strip().str.upper() != "CONTROL"].copy()
     if not personas_num.empty and "CÓDIGO DE USUARIO" in personas_num.columns:
         personas_num["CÓDIGO DE USUARIO"] = personas_num["CÓDIGO DE USUARIO"].map(canon_user_code)
@@ -529,7 +537,7 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
             "CLIENTE":"last",
             "NOMBRE":"last",
             "CÉDULA":"last",
-            "CÓDIGO DE DOSÍMETRO":"last",   # <- conservar el código de dosímetro
+            "CÓDIGO DE DOSÍMETRO":"last",   # conservar el código de dosímetro
             "TIPO DE DOSÍMETRO":"last",
             "FECHA DE LECTURA":"last",
             "_Hp10_NUM":"sum",
@@ -541,7 +549,7 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
             "_Hp3_NUM":"Hp (3)"
         })
 
-    # CONTROL (desde df_vista; convertir a número para promediar)
+    # CONTROL (promedio por periodo)
     ctrl_consol = pd.DataFrame()
     control_v = df_vista[df_vista["NOMBRE"].astype(str).str.strip().str.upper() == "CONTROL"].copy()
     if not control_v.empty:
@@ -565,7 +573,7 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
     if out.empty:
         return out
 
-    # Asegura columnas clave
+    # Asegura columnas
     for col in ["PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO",
                 "NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
                 "Hp (10)","Hp (0.07)","Hp (3)"]:
@@ -579,7 +587,7 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
     for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
         out[h] = out[h].map(_fmt)
 
-    # Orden de columnas y sort seguros
+    # Orden/Sort
     orden_pref = ["PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE",
                   "CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO","Hp (10)","Hp (0.07)","Hp (3)"]
     cols = [c for c in orden_pref if c in out.columns] + [c for c in out.columns if c not in orden_pref]
@@ -706,6 +714,7 @@ with tab1:
 
                 if res.get("ok"):
                     st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s).")
+                    st.toast("¡Datos enviados a Ninox!", icon="✅")
                 else:
                     st.error(f"❌ Error al subir: {res.get('error')}")
 
@@ -825,8 +834,7 @@ with tab2:
                         if 'ctrl_view' in locals() and not ctrl_view.empty:
                             ordenar_cols_reporte(ctrl_view, "control").to_excel(writer, index=False, sheet_name="Control")
                         df_nx.to_excel(writer, index=False, sheet_name="Detalle")
-
-                        # Hoja Leyenda
+                        # Leyenda
                         leyenda_rows = [
                             ["MICROSIEVERT, S.A."],
                             ["PH Conardo — Calle 41 Este, Panamá — PANAMÁ"],
@@ -839,13 +847,9 @@ with tab2:
                             ["- Hp(3): Dosis equivalente a cristalino (prof. 3 mm)."],
                             [],
                             ["Información del reporte"],
-                            ["- Periodo de lectura: Periodo de uso del dosímetro personal."],
-                            ["- Fecha de lectura: Fecha en que se realizó la lectura del dosímetro."],
-                            ["- Tipo de dosímetro: CE=Cuerpo Entero; A=Anillo; B=Brazalete; CR=Cristalino."],
-                            ["- PM: Por debajo del mínimo detectado para el periodo."],
+                            ["- Periodo de lectura / Fecha / Tipo / PM."],
                             [],
-                            ["Dosis acumuladas"],
-                            ["- Actual / Anual / De por vida"],
+                            ["Dosis acumuladas: Actual, Anual y De por vida"],
                         ]
                         pd.DataFrame(leyenda_rows).to_excel(writer, index=False, header=False, sheet_name="Leyenda")
                         ws = writer.sheets["Leyenda"]
@@ -953,7 +957,7 @@ with tab2:
                     if 'ctrl_view' in locals() and not ctrl_view.empty:
                         ordenar_cols_reporte(ctrl_view, "control").to_excel(writer, index=False, sheet_name="Control")
                     st.session_state["df_final_vista"].to_excel(writer, index=False, sheet_name="Detalle")
-
+                    # Leyenda
                     leyenda_rows = [
                         ["MICROSIEVERT, S.A."],
                         ["PH Conardo — Calle 41 Este, Panamá — PANAMÁ"],
@@ -980,4 +984,5 @@ with tab2:
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+
 
