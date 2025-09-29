@@ -32,7 +32,7 @@ def canon_user_code(x: str) -> str:
     return digits if digits else s
 
 def pmfmt(v, thr: float = 0.005) -> str:
-    """Devuelve 'PM' si v<thr; si no, número con 2 decimales."""
+    """Devuelve 'PM' si v<thr; si no, número con 2 decimales (0.00)."""
     try:
         f = float(v)
     except Exception:
@@ -407,6 +407,12 @@ def construir_registros(df_lista: pd.DataFrame,
     return df_final
 
 # ===================== Resta de CONTROL + Formato =====================
+def _is_control_name(x: str) -> bool:
+    s = strip_accents(str(x or ""))
+    s = re.sub(r"\s+", " ", s).strip().upper()
+    # Cubre variantes comunes
+    return s == "CONTROL" or s == "DOSIMETRO CONTROL" or s == "CONTROL DOSIMETRO"
+
 def aplicar_resta_control_y_formato(
     df_final: pd.DataFrame,
     umbral_pm: float = 0.005,
@@ -415,7 +421,7 @@ def aplicar_resta_control_y_formato(
     """Devuelve:
        - df_vista: Hp visibles (PM/xx.xx) ya restadas
        - df_num  : Hp numéricas restadas (_Hp10_NUM/_Hp007_NUM/_Hp3_NUM) + metadatos
-       También resta el control a las filas donde NOMBRE = CONTROL.
+       Resta también a las filas donde NOMBRE sea CONTROL (robusto) o cuando exista _IS_CONTROL.
     """
     if df_final is None or df_final.empty:
         return df_final, df_final
@@ -429,7 +435,12 @@ def aplicar_resta_control_y_formato(
             df[h] = 0.0
         df[h] = pd.to_numeric(df[h], errors="coerce").fillna(0.0)
 
-    is_control = df["NOMBRE"].astype(str).str.strip().str.upper().eq("CONTROL")
+    # Detección robusta de CONTROL
+    if "_IS_CONTROL" in df.columns:
+        is_control = df["_IS_CONTROL"].astype(bool)
+    else:
+        is_control = df["NOMBRE"].apply(_is_control_name)
+
     df_ctrl = df[is_control].copy()
     df_per  = df[~is_control].copy()
 
@@ -498,7 +509,7 @@ def aplicar_resta_control_y_formato(
     out_view["Hp (0.07)"] = out_view["_Hp007_NUM"].map(fmt)
     out_view["Hp (3)"]    = out_view["_Hp3_NUM"].map(fmt)
 
-    # --- CONTROL: también restar contra su propio promedio de control del periodo ---
+    # --- CONTROL: también restar contra su propio promedio del periodo ---
     ctrl_means = df_ctrl.groupby(["PERIODO DE LECTURA"], as_index=False).agg({
         "Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"
     }).rename(columns={"Hp (10)":"Hp10_CTRL","Hp (0.07)":"Hp007_CTRL","Hp (3)":"Hp3_CTRL"})
@@ -984,5 +995,4 @@ with tab2:
                     file_name=f"Reporte_Dosimetria_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-
 
