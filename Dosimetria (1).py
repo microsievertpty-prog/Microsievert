@@ -45,6 +45,13 @@ def hp_to_num(x) -> float:
     except Exception:
         return 0.0
 
+def last_nonempty(series: pd.Series) -> str:
+    """Devuelve el último valor no vacío de una serie (como string)."""
+    for v in series.iloc[::-1]:
+        if str(v).strip():
+            return str(v)
+    return ""
+
 # ---------- Normalización de PERIODO ----------
 MES_MAP = {
     "ENE":"ENERO","FEB":"FEBRERO","MAR":"MARZO","ABR":"ABRIL","MAY":"MAYO","JUN":"JUNIO",
@@ -246,10 +253,6 @@ def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
 
     # ----------- DETECCIÓN DE CONTROL (solo si EMPIEZA con 'CONTROL') -----------
     def _is_control_name(x: str) -> bool:
-        """
-        True SOLO si el texto comienza con 'CONTROL'
-        (insensible a tildes, mayúsculas y espacios).
-        """
         s = strip_accents(str(x or "")).upper()
         s = re.sub(r"\s+", " ", s).strip()
         return s.startswith("CONTROL")
@@ -448,11 +451,16 @@ def aplicar_resta_control_y_formato(
 
 # ===================== Consolidación para upload =====================
 def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
-    """Consolida para subir a Ninox. Personas sumadas por periodo/usuario; CONTROL promediado por periodo."""
+    """
+    Consolida para subir a Ninox.
+    - PERSONAS: suma por periodo/usuario de las dosis corregidas.
+    - CONTROL: promedio por periodo de las filas de control,
+      conservando CÓDIGO DE USUARIO y CÉDULA si existen (último no vacío).
+    """
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
 
-    # PERSONAS
+    # PERSONAS (no control)
     personas_num = df_num[df_num["NOMBRE"].apply(_is_control_name_session) == False].copy()
     per_consol = pd.DataFrame()
     if not personas_num.empty:
@@ -472,15 +480,18 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
             "_Hp3_NUM":"Hp (3)"
         })
 
-    # CONTROL
+    # CONTROL (conserva código de usuario si existe)
     ctrl_consol = pd.DataFrame()
     control_v = df_vista[df_vista["NOMBRE"].apply(_is_control_name_session)].copy()
     if not control_v.empty:
+        # pasar a num para promediar
         for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-            control_v[h] = pd.to_numeric(control_v[h], errors="coerce").fillna(0.0)
+            control_v[h] = control_v[h].apply(hp_to_num)
         ctrl_consol = control_v.groupby(["PERIODO DE LECTURA"], as_index=False).agg({
             "CLIENTE":"last",
             "CÓDIGO DE DOSÍMETRO":"first",
+            "CÓDIGO DE USUARIO": last_nonempty,
+            "CÉDULA": last_nonempty,
             "TIPO DE DOSÍMETRO":"last",
             "FECHA DE LECTURA":"last",
             "Hp (10)":"mean",
@@ -488,8 +499,6 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
             "Hp (3)":"mean"
         })
         ctrl_consol["NOMBRE"] = "CONTROL"
-        ctrl_consol["CÓDIGO DE USUARIO"] = ""
-        ctrl_consol["CÉDULA"] = "CONTROL"
 
     out = pd.concat([ctrl_consol, per_consol], ignore_index=True, sort=False)
     if out.empty:
@@ -773,5 +782,3 @@ with tab2:
                 st.dataframe(ctrl_view, use_container_width=True)
             else:
                 st.info("No hay filas de CONTROL en la sesión.")
-
-
