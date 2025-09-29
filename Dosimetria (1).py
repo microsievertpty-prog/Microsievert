@@ -25,6 +25,7 @@ def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 def pmfmt2(v, thr: float = 0.005) -> str:
+    """PM si v<thr; si no, 2 decimales."""
     try:
         f = float(v)
     except Exception:
@@ -43,8 +44,9 @@ def hp_to_num(x) -> float:
     except Exception:
         return 0.0
 
+# ---------- Normalización de PERIODO ----------
 MES_MAP = {
-    "ENE":"ENERO","FEB":"FEBRERO","MAR":"MARZO","ABR":"ABRIL","MAY":"MAYO","JUN":"JUNIO",
+    "ENE":"ENERO","FEB":"FEBRERO","MAR":"MARZO","ABR":"ABRIL","MAYO":"MAYO","JUN":"JUNIO",
     "JUL":"JULIO","AGO":"AGOSTO","SEP":"SEPTIEMBRE","OCT":"OCTUBRE","NOV":"NOVIEMBRE","DIC":"DICIEMBRE",
     "JAN":"ENERO","APR":"ABRIL","AUG":"AGOSTO","DEC":"DICIEMBRE",
 }
@@ -155,7 +157,7 @@ def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
     return out
 
 def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
-    """Convierte registros de Ninox a DataFrame y garantiza columnas esperadas."""
+    """Convierte registros de Ninox y garantiza columnas esperadas."""
     expected = [
         "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO",
         "NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
@@ -167,11 +169,9 @@ def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
         row = {k: f.get(k) for k in expected}
         rows.append(row)
     df = pd.DataFrame(rows)
-    # crea faltantes como vacío
     for col in expected:
         if col not in df.columns:
             df[col] = "" if col not in ["Hp (10)","Hp (0.07)","Hp (3)"] else 0.0
-    # normaliza periodo
     df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
     return df[expected]
 
@@ -238,7 +238,7 @@ def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
         out["NOMBRE"] = df[c_nom].astype(str).str.strip()
     else:
         out["NOMBRE"] = ""
-    out["CLIENTE"]           = df[c_cli].astype(str).str.strip() if c_cli else ""
+    out["CLIENTE"]              = df[c_cli].astype(str).str.strip() if c_cli else ""
     out["CÓDIGO DE DOSÍMETRO"]  = (df[c_cod].astype(str).str.strip().str.upper() if c_cod else "")
     out["PERIODO DE LECTURA"]   = (df[c_per].astype(str).map(normalizar_periodo) if c_per else "")
     out["TIPO DE DOSÍMETRO"]    = df[c_tipo].astype(str).str.strip() if c_tipo else ""
@@ -413,6 +413,7 @@ def aplicar_resta_control_y_formato(
 
 # ===================== Reporte único (CONTROL primero) =====================
 def construir_reporte_unico(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
+    """Una sola tabla: CONTROL primero; personas después. Último periodo + ANUAL/DE POR VIDA (suma)."""
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
 
@@ -426,25 +427,22 @@ def construir_reporte_unico(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral
 
         personas_num["__fecha__"] = personas_num["PERIODO DE LECTURA"].map(periodo_to_date)
         idx_last = personas_num.groupby("CÓDIGO DE USUARIO")["__fecha__"].idxmax()
-        keep_cols_last = ["CÓDIGO DE USUARIO","PERIODO DE LECTURA","_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","FECHA DE LECTURA","TIPO DE DOSÍMETRO"]
-        keep_cols_last = [c for c in keep_cols_last if c in personas_num.columns]
-        per_last = (personas_num.loc[idx_last, keep_cols_last]
+        per_last = (personas_num.loc[idx_last, ["CÓDIGO DE USUARIO","PERIODO DE LECTURA","_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","FECHA DE LECTURA","TIPO DE DOSÍMETRO"]]
                     .rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"}))
         per_view = per_anual.merge(per_last, on="CÓDIGO DE USUARIO", how="left")
         for c in ["Hp (10)","Hp (0.07)","Hp (3)","Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL"]:
-            if c in per_view.columns:
-                per_view[c] = per_view[c].map(lambda v: pmfmt2(v, umbral_pm))
-        per_view["Hp (10) DE POR VIDA"]   = per_view.get("Hp (10) ANUAL", "")
-        per_view["Hp (0.07) DE POR VIDA"] = per_view.get("Hp (0.07) ANUAL", "")
-        per_view["Hp (3) DE POR VIDA"]    = per_view.get("Hp (3) ANUAL", "")
+            per_view[c] = per_view[c].map(lambda v: pmfmt2(v, umbral_pm))
+        per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
+        per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
+        per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
         per_view["CÓDIGO DE DOSÍMETRO"]   = per_view["CÓDIGO DE DOSÍMETRO"].fillna("")
-        personas_final = per_view.reindex(columns=[
+        personas_final = per_view[[
             "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE","CÉDULA",
             "FECHA DE LECTURA","TIPO DE DOSÍMETRO",
             "Hp (10)","Hp (0.07)","Hp (3)",
             "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
             "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
-        ])
+        ]]
     else:
         personas_final = pd.DataFrame(columns=[
             "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE","CÉDULA",
@@ -466,9 +464,7 @@ def construir_reporte_unico(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral
         tmp = df_vista[df_vista["NOMBRE"].apply(is_control_name)].copy()
         tmp["__fecha__"] = tmp["PERIODO DE LECTURA"].map(periodo_to_date)
         idx_last_c = tmp.groupby("CÓDIGO DE DOSÍMETRO")["__fecha__"].idxmax()
-        keep_cols_last_c = ["CÓDIGO DE DOSÍMETRO","PERIODO DE LECTURA","Hp (10)","Hp (0.07)","Hp (3)","FECHA DE LECTURA"]
-        keep_cols_last_c = [c for c in keep_cols_last_c if c in tmp.columns]
-        last_vals = tmp.loc[idx_last_c, keep_cols_last_c]
+        last_vals = tmp.loc[idx_last_c, ["CÓDIGO DE DOSÍMETRO","PERIODO DE LECTURA","Hp (10)","Hp (0.07)","Hp (3)","FECHA DE LECTURA"]]
         ctrl_view = ctrl_anual.merge(last_vals, on="CÓDIGO DE DOSÍMETRO", how="left")
 
         def _fill_usercode(row):
@@ -477,12 +473,18 @@ def construir_reporte_unico(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral
         ctrl_view["CÓDIGO DE USUARIO"] = ctrl_view.apply(_fill_usercode, axis=1)
 
         for c in ["Hp (10)","Hp (0.07)","Hp (3)","Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL"]:
-            if c in ctrl_view.columns:
-                ctrl_view[c] = ctrl_view[c].map(lambda v: pmfmt2(v, umbral_pm))
-        ctrl_view["Hp (10) DE POR VIDA"]   = ctrl_view.get("Hp (10) ANUAL", "")
-        ctrl_view["Hp (0.07) DE POR VIDA"] = ctrl_view.get("Hp (0.07) ANUAL", "")
-        ctrl_view["Hp (3) DE POR VIDA"]    = ctrl_view.get("Hp (3) ANUAL", "")
-        ctrl_final = ctrl_view.reindex(columns=personas_final.columns)
+            ctrl_view[c] = ctrl_view[c].map(lambda v: pmfmt2(v, umbral_pm))
+        ctrl_view["Hp (10) DE POR VIDA"]   = ctrl_view["Hp (10) ANUAL"]
+        ctrl_view["Hp (0.07) DE POR VIDA"] = ctrl_view["Hp (0.07) ANUAL"]
+        ctrl_view["Hp (3) DE POR VIDA"]    = ctrl_view["Hp (3) ANUAL"]
+
+        ctrl_final = ctrl_view[[
+            "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE","CÉDULA",
+            "FECHA DE LECTURA","TIPO DE DOSÍMETRO",
+            "Hp (10)","Hp (0.07)","Hp (3)",
+            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
+        ]]
     else:
         ctrl_final = pd.DataFrame(columns=personas_final.columns)
 
@@ -618,7 +620,6 @@ with tab2:
                 st.warning("No se recibieron registros desde Ninox.")
                 df_reporte = pd.DataFrame()
             else:
-                # Para el reporte: usamos df_nx como "vista" y construimos df_num numérico
                 df_vista_nx = df_nx.copy()
                 df_num_nx   = df_nx.copy()
                 for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
@@ -660,3 +661,5 @@ with tab2:
                                file_name=f"{file_base}.csv", mime="text/csv")
     else:
         st.info("No hay datos para mostrar en el reporte final.")
+
+
