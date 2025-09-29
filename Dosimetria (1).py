@@ -410,27 +410,31 @@ def construir_registros(df_lista: pd.DataFrame,
 def _is_control_name(x: str) -> bool:
     s = strip_accents(str(x or ""))
     s = re.sub(r"\s+", " ", s).strip().upper()
-    # Cubre variantes comunes
-    return s == "CONTROL" or s == "DOSIMETRO CONTROL" or s == "CONTROL DOSIMETRO"
+    return s in {"CONTROL", "DOSIMETRO CONTROL", "CONTROL DOSIMETRO"}
 
 def aplicar_resta_control_y_formato(
     df_final: pd.DataFrame,
     umbral_pm: float = 0.005,
     manual_ctrl: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Devuelve:
-       - df_vista: Hp visibles (PM/xx.xx) ya restadas
-       - df_num  : Hp numéricas restadas (_Hp10_NUM/_Hp007_NUM/_Hp3_NUM) + metadatos
-       Resta también a las filas donde NOMBRE sea CONTROL (robusto) o cuando exista _IS_CONTROL.
+    """
+    - Resta el CONTROL al valor de cada fila (personas y también las filas CONTROL),
+      por PERIODO (y si hay, también por CLIENTE y TIPO).
+    - Recorta negativos a 0 y formatea como 'PM' si < umbral_pm, sino con 2 decimales.
+    - Devuelve:
+        df_vista: columnas Hp en texto ('PM' o '0.00')
+        df_num  : columnas numéricas corregidas _Hp10_NUM/_Hp007_NUM/_Hp3_NUM para sumas.
     """
     if df_final is None or df_final.empty:
         return df_final, df_final
 
     df = df_final.copy()
+
+    # Asegurar columnas y tipos
     for c in ["PERIODO DE LECTURA","CLIENTE","TIPO DE DOSÍMETRO","NOMBRE"]:
         if c not in df.columns:
             df[c] = ""
-    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+    for h in ["Hp (10)", "Hp (0.07)", "Hp (3)"]:
         if h not in df.columns:
             df[h] = 0.0
         df[h] = pd.to_numeric(df[h], errors="coerce").fillna(0.0)
@@ -439,24 +443,31 @@ def aplicar_resta_control_y_formato(
     if "_IS_CONTROL" in df.columns:
         is_control = df["_IS_CONTROL"].astype(bool)
     else:
-        is_control = df["NOMBRE"].apply(_is_control_name)
+        if "ETIQUETA" in df.columns:
+            is_control = df["NOMBRE"].apply(_is_control_name) | df["ETIQUETA"].apply(_is_control_name)
+        else:
+            is_control = df["NOMBRE"].apply(_is_control_name)
 
     df_ctrl = df[is_control].copy()
     df_per  = df[~is_control].copy()
 
-    # --- Sin CONTROL registrado: aplicar control manual si está habilitado ---
+    # ---------- SIN CONTROL: usar control manual (si se activa) ----------
     if df_ctrl.empty:
         out = df_per.copy()
-        if (manual_ctrl is not None) and (float(manual_ctrl) > 0):
-            out["_Hp10_NUM"]  = (out["Hp (10)"]   - float(manual_ctrl)).clip(lower=0.0)
-            out["_Hp007_NUM"] = (out["Hp (0.07)"] - float(manual_ctrl)).clip(lower=0.0)
-            out["_Hp3_NUM"]   = (out["Hp (3)"]    - float(manual_ctrl)).clip(lower=0.0)
+        if manual_ctrl is not None and float(manual_ctrl) > 0:
+            cval = float(manual_ctrl)
+            out["_Hp10_NUM"]  = (out["Hp (10)"]   - cval).clip(lower=0.0)
+            out["_Hp007_NUM"] = (out["Hp (0.07)"] - cval).clip(lower=0.0)
+            out["_Hp3_NUM"]   = (out["Hp (3)"]    - cval).clip(lower=0.0)
         else:
             out["_Hp10_NUM"]  = out["Hp (10)"]
             out["_Hp007_NUM"] = out["Hp (0.07)"]
             out["_Hp3_NUM"]   = out["Hp (3)"]
 
-        def fmt(v): return "PM" if float(v) < umbral_pm else f"{float(v):.2f}"
+        def fmt(v):
+            v = float(v)
+            return "PM" if v < umbral_pm else f"{v:.2f}"
+
         out_view = out.copy()
         out_view["Hp (10)"]   = out_view["_Hp10_NUM"].map(fmt)
         out_view["Hp (0.07)"] = out_view["_Hp007_NUM"].map(fmt)
@@ -468,14 +479,18 @@ def aplicar_resta_control_y_formato(
                         "TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
         return df_vista, df_num
 
-    # --- Con CONTROL: calcular promedios y restar (personas y también CONTROL) ---
-    def agg_ctrl(g):
+    # ---------- CON CONTROL: calcular control por periodo (jerarquía de precisión) ----------
+    def agg_mean(g):
         return g.agg({"Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"})
-    ctrl_lvl3 = df_ctrl.groupby(["PERIODO DE LECTURA","CLIENTE","TIPO DE DOSÍMETRO"], as_index=False).apply(agg_ctrl)
-    ctrl_lvl2 = df_ctrl.groupby(["PERIODO DE LECTURA","CLIENTE"], as_index=False).apply(agg_ctrl)
-    ctrl_lvl1 = df_ctrl.groupby(["PERIODO DE LECTURA"], as_index=False).apply(agg_ctrl)
 
-    # --- Personas ---
+    # Nivel 3: PERIODO + CLIENTE + TIPO
+    ctrl_lvl3 = df_ctrl.groupby(["PERIODO DE LECTURA","CLIENTE","TIPO DE DOSÍMETRO"], as_index=False).apply(agg_mean)
+    # Nivel 2: PERIODO + CLIENTE
+    ctrl_lvl2 = df_ctrl.groupby(["PERIODO DE LECTURA","CLIENTE"], as_index=False).apply(agg_mean)
+    # Nivel 1: PERIODO
+    ctrl_lvl1 = df_ctrl.groupby(["PERIODO DE LECTURA"], as_index=False).apply(agg_mean)
+
+    # --- Aplica control a PERSONAS ---
     out = df_per.copy()
     for lvl, keys in [
         (ctrl_lvl3, ["PERIODO DE LECTURA","CLIENTE","TIPO DE DOSÍMETRO"]),
@@ -499,36 +514,50 @@ def aplicar_resta_control_y_formato(
     out["Hp007_CTRL"] = out.apply(lambda r: first_nonnull_series(r, "Hp007_CTRL"), axis=1)
     out["Hp3_CTRL"]   = out.apply(lambda r: first_nonnull_series(r, "Hp3_CTRL"), axis=1)
 
+    # Resta y recorta a 0
     out["_Hp10_NUM"]  = (out["Hp (10)"]   - out["Hp10_CTRL"]).clip(lower=0.0)
     out["_Hp007_NUM"] = (out["Hp (0.07)"] - out["Hp007_CTRL"]).clip(lower=0.0)
     out["_Hp3_NUM"]   = (out["Hp (3)"]    - out["Hp3_CTRL"]).clip(lower=0.0)
 
-    def fmt(v): return "PM" if float(v) < umbral_pm else f"{float(v):.2f}"
+    # Formato visible
+    def fmt(v):
+        v = float(v)
+        return "PM" if v < umbral_pm else f"{v:.2f}"
+
     out_view = out.copy()
     out_view["Hp (10)"]   = out_view["_Hp10_NUM"].map(fmt)
     out_view["Hp (0.07)"] = out_view["_Hp007_NUM"].map(fmt)
     out_view["Hp (3)"]    = out_view["_Hp3_NUM"].map(fmt)
 
-    # --- CONTROL: también restar contra su propio promedio del periodo ---
+    # --- Aplica control a las filas CONTROL (para que queden ~0 → PM) ---
     ctrl_means = df_ctrl.groupby(["PERIODO DE LECTURA"], as_index=False).agg({
         "Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"
     }).rename(columns={"Hp (10)":"Hp10_CTRL","Hp (0.07)":"Hp007_CTRL","Hp (3)":"Hp3_CTRL"})
     df_ctrl_adj = df_ctrl.merge(ctrl_means, on="PERIODO DE LECTURA", how="left")
-    df_ctrl_adj["Hp (10)"]   = (df_ctrl_adj["Hp (10)"]   - df_ctrl_adj["Hp10_CTRL"]).clip(lower=0.0).map(fmt)
-    df_ctrl_adj["Hp (0.07)"] = (df_ctrl_adj["Hp (0.07)"] - df_ctrl_adj["Hp007_CTRL"]).clip(lower=0.0).map(fmt)
-    df_ctrl_adj["Hp (3)"]    = (df_ctrl_adj["Hp (3)"]    - df_ctrl_adj["Hp3_CTRL"]).clip(lower=0.0).map(fmt)
+    df_ctrl_adj["_Hp10_NUM"]  = (df_ctrl_adj["Hp (10)"]   - df_ctrl_adj["Hp10_CTRL"]).clip(lower=0.0)
+    df_ctrl_adj["_Hp007_NUM"] = (df_ctrl_adj["Hp (0.07)"] - df_ctrl_adj["Hp007_CTRL"]).clip(lower=0.0)
+    df_ctrl_adj["_Hp3_NUM"]   = (df_ctrl_adj["Hp (3)"]    - df_ctrl_adj["Hp3_CTRL"]).clip(lower=0.0)
+    df_ctrl_adj["Hp (10)"]    = df_ctrl_adj["_Hp10_NUM"].map(fmt)
+    df_ctrl_adj["Hp (0.07)"]  = df_ctrl_adj["_Hp007_NUM"].map(fmt)
+    df_ctrl_adj["Hp (3)"]     = df_ctrl_adj["_Hp3_NUM"].map(fmt)
 
-    # Resultado visible: CONTROL (ya restado) + PERSONAS (restadas)
-    df_vista = pd.concat([df_ctrl_adj.drop(columns=["Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"], errors="ignore"),
-                          out_view], ignore_index=True)
+    # Ensamble: CONTROL (restado) + PERSONAS (restadas)
+    df_vista = pd.concat(
+        [df_ctrl_adj.drop(columns=["Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"], errors="ignore"),
+         out_view],
+        ignore_index=True
+    )
     df_vista = df_vista.sort_values(by=["NOMBRE","CÉDULA"], ascending=[True, True]) \
                        .sort_values(by="NOMBRE", key=lambda s: s.str.upper().ne("CONTROL")) \
                        .reset_index(drop=True)
 
-    # Resultado numérico solo para personas (para sumas)
-    df_num = out[["_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
-                  "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-                  "TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
+    # Numérico para sumas (solo personas)
+    df_num = out[[
+        "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
+        "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+        "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
+    ]].copy()
+
     return df_vista, df_num
 
 # ===================== Consolidación para subir a Ninox (incluye CÓDIGO DE DOSÍMETRO) =====================
