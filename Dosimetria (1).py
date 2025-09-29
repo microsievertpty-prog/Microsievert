@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 import re
 import unicodedata
 from io import BytesIO
@@ -774,3 +774,4 @@ with tab2:
                 st.dataframe(ctrl_view, use_container_width=True)
             else:
                 st.info("No hay filas de CONTROL en la sesión.")
+
