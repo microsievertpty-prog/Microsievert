@@ -25,7 +25,7 @@ def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 def pmfmt(v, thr: float = 0.005) -> str:
-    """Devuelve 'PM' si v<thr; si no, número con 2 decimales."""
+    """Devuelve 'PM' si v<thr; si no, número con 2 decimales (0.00)."""
     try:
         f = float(v)
     except Exception:
@@ -348,10 +348,14 @@ def aplicar_resta_control_y_formato(
     df_final: pd.DataFrame,
     umbral_pm: float = 0.005,
     manual_ctrl: Optional[float] = None,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Devuelve (df_vista texto, df_num numérico corregido)."""
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Devuelve:
+    - df_vista (texto con PM y 0.00 para mostrar),
+    - df_num (personas numérico CORREGIDO para sumar),
+    - df_ctrl_raw (CONTROL ORIGINAL sin restar, numérico, para sumar en reporte final).
+    """
     if df_final is None or df_final.empty:
-        return df_final, df_final
+        return df_final, df_final, pd.DataFrame()
 
     df = df_final.copy()
     for h in ["Hp (10)", "Hp (0.07)", "Hp (3)"]:
@@ -361,13 +365,15 @@ def aplicar_resta_control_y_formato(
     if "PERIODO DE LECTURA" in df.columns:
         df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
 
+    # Separación sobre ORIGINAL (sin restas)
     is_control = df["NOMBRE"].apply(_is_control_name_session)
-    df_ctrl = df[is_control].copy()
-    df_per  = df[~is_control].copy()
+    df_ctrl_raw = df[is_control].copy()     # ORIGINAL para sumar en reporte de control
+    df_per      = df[~is_control].copy()    # Personas
 
+    # Medias de control por periodo para restar a personas
     ctrl_means = pd.DataFrame(columns=["PERIODO DE LECTURA","Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"])
-    if not df_ctrl.empty:
-        ctrl_means = df_ctrl.groupby("PERIODO DE LECTURA", as_index=False).agg({
+    if not df_ctrl_raw.empty:
+        ctrl_means = df_ctrl_raw.groupby("PERIODO DE LECTURA", as_index=False).agg({
             "Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"
         }).rename(columns={"Hp (10)":"Hp10_CTRL","Hp (0.07)":"Hp007_CTRL","Hp (3)":"Hp3_CTRL"})
 
@@ -391,6 +397,7 @@ def aplicar_resta_control_y_formato(
             out["_Hp007_NUM"] = out["Hp (0.07)"]
             out["_Hp3_NUM"]   = out["Hp (3)"]
 
+    # Vista (texto) para Tab 1
     def fmt(v):
         v = float(v)
         return "PM" if v < umbral_pm else f"{v:.2f}"
@@ -399,9 +406,10 @@ def aplicar_resta_control_y_formato(
     out_view["Hp (0.07)"] = out_view["_Hp007_NUM"].map(fmt)
     out_view["Hp (3)"]    = out_view["_Hp3_NUM"].map(fmt)
 
+    # (Opcional) mostrar control "corregido" en vista (no afecta al reporte sumado)
     df_ctrl_view = pd.DataFrame()
-    if not df_ctrl.empty:
-        df_ctrl_view = df_ctrl.merge(ctrl_means, on="PERIODO DE LECTURA", how="left")
+    if not df_ctrl_raw.empty and not ctrl_means.empty:
+        df_ctrl_view = df_ctrl_raw.merge(ctrl_means, on="PERIODO DE LECTURA", how="left")
         for c in ["Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"]:
             df_ctrl_view[c] = df_ctrl_view[c].fillna(0.0)
         df_ctrl_view["_Hp10_NUM"]  = (df_ctrl_view["Hp (10)"]   - df_ctrl_view["Hp10_CTRL"]).clip(lower=0.0)
@@ -414,19 +422,26 @@ def aplicar_resta_control_y_formato(
     df_vista = pd.concat([df_ctrl_view, out_view], ignore_index=True, sort=False)
     if not df_vista.empty:
         df_vista["__is_control__"] = df_vista["NOMBRE"].apply(_is_control_name_session)
-        df_vista = df_vista.sort_values(by=["__is_control__","NOMBRE","CÉDULA"], ascending=[False, True, True]).drop(columns=["__is_control__"])
+        df_vista = df_vista.sort_values(by=["__is_control__","NOMBRE","CÉDULA"],
+                                        ascending=[False, True, True]).drop(columns=["__is_control__"])
 
+    # df_num (personas CORREGIDAS) para sumas
     df_num = out[[
         "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
         "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
         "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
     ]].copy()
 
-    return df_vista, df_num
+    # df_ctrl_raw: asegurar numérico (ORIGINAL, sin restas)
+    if not df_ctrl_raw.empty:
+        for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+            df_ctrl_raw[h] = pd.to_numeric(df_ctrl_raw[h], errors="coerce").fillna(0.0)
+
+    return df_vista, df_num, df_ctrl_raw
 
 # ===================== Consolidación para subir =====================
 def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
-    """Consolida personas (sumas) + control (promedio), y ordena campos."""
+    """Consolida personas (sumas) + control (promedio por periodo), y ordena campos."""
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
 
@@ -511,7 +526,6 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
 def construir_archivo_reporte(df_personas: pd.DataFrame, df_control: pd.DataFrame, nombre_base: str) -> Tuple[str, bytes, str]:
     """Genera un Excel (dos pestañas) y devuelve (filename, bytes, mime)."""
     buf = BytesIO()
-    # openpyxl evita dependencia a xlsxwriter en Streamlit Cloud
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         if not df_personas.empty:
             df_personas.to_excel(writer, sheet_name="Personas", index=False)
@@ -530,7 +544,7 @@ with tab1:
     upl_lista = st.file_uploader("Sube la LISTA DE CÓDIGO (CSV / XLS / XLSX)", type=["csv","xls","xlsx"], key="upl_lista")
     df_lista = leer_lista_codigo(upl_lista) if upl_lista else None
     if df_lista is not None and not df_lista.empty:
-        st.success(f"LISTA cargada: {len(df_lista)} filas")
+        st.success(f"LISTA cargada: {len[df_lista]} filas") if False else st.success(f"LISTA cargada: {len(df_lista)} filas")
         st.dataframe(df_lista.head(20), use_container_width=True)
     else:
         st.info("LISTA vacía o sin datos")
@@ -571,12 +585,13 @@ with tab1:
                     })
                 st.warning("⚠️ No hay coincidencias **CÓDIGO_DOSÍMETRO** ↔ **dosimeter** (revisa periodos/códigos).")
             else:
-                df_vista, df_num_corr = aplicar_resta_control_y_formato(
+                df_vista, df_num_corr, df_ctrl_raw = aplicar_resta_control_y_formato(
                     df_final_raw, umbral_pm=0.005,
                     manual_ctrl=(manual_ctrl_val if use_manual_ctrl else None)
                 )
                 st.session_state.df_final_vista = df_vista.drop(columns=["_IS_CONTROL"], errors="ignore")
                 st.session_state.df_final_num   = df_num_corr
+                st.session_state.df_ctrl_raw    = df_ctrl_raw  # ← CONTROL ORIGINAL
                 st.success(f"¡Listo! Registros generados (corregidos): {len(st.session_state.df_final_vista)}")
                 st.dataframe(st.session_state.df_final_vista, use_container_width=True)
                 st.caption(f"Controles detectados: {(st.session_state.df_final_vista['NOMBRE'].apply(_is_control_name_session)).sum()}")
@@ -679,12 +694,13 @@ with tab2:
         # Usar lo ya procesado en la pestaña 1
         df_vista = st.session_state.get("df_final_vista")      # texto (PM, etc.)
         df_num   = st.session_state.get("df_final_num")        # numéricos (para sumas)
+        df_ctrl_raw = st.session_state.get("df_ctrl_raw")      # CONTROL ORIGINAL
 
         if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
             st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
         else:
             people_df  = df_num[df_num["NOMBRE"].apply(_is_control_name_session) == False].copy()
-            control_df = df_vista[df_vista["NOMBRE"].apply(_is_control_name_session)].copy()
+            control_df = (df_ctrl_raw if isinstance(df_ctrl_raw, pd.DataFrame) else pd.DataFrame()).copy()
 
             # Selector de CLIENTE
             all_clients = sorted(pd.Series(
@@ -701,7 +717,7 @@ with tab2:
     per_view = pd.DataFrame()
     if not people_df.empty:
         if {"_Hp10_NUM","_Hp007_NUM","_Hp3_NUM"}.issubset(people_df.columns):
-            # Datos de sesión
+            # Datos de sesión (corregidos)
             per_anual = people_df.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
                 "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
                 "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
@@ -713,7 +729,7 @@ with tab2:
                         .rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"}))
             per_view = per_anual.merge(per_last, on="CÓDIGO DE USUARIO", how="left")
         else:
-            # Datos de Ninox
+            # Datos de Ninox (convertir PM→0)
             for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
                 people_df[h] = people_df[h].apply(hp_to_num)
             per_anual = people_df.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
@@ -745,7 +761,7 @@ with tab2:
     else:
         st.info("No hay filas de personas con ese filtro.")
 
-    # ========== Reporte: Control ==========
+    # ========== Reporte: Control (sumando ORIGINAL) ==========
     ctrl_view = pd.DataFrame()
     if not control_df.empty:
         df_ctl = control_df.copy()
