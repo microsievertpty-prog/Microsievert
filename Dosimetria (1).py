@@ -1,4 +1,4 @@
-
+# -*- coding: utf-8 -*-
 import re
 import unicodedata
 from io import BytesIO
@@ -43,13 +43,6 @@ def hp_to_num(x) -> float:
     except Exception:
         return 0.0
 
-def last_nonempty(series: pd.Series) -> str:
-    for v in series.iloc[::-1]:
-        if str(v).strip():
-            return str(v)
-    return ""
-
-# ---------- Normalización de PERIODO ----------
 MES_MAP = {
     "ENE":"ENERO","FEB":"FEBRERO","MAR":"MARZO","ABR":"ABRIL","MAY":"MAYO","JUN":"JUNIO",
     "JUL":"JULIO","AGO":"AGOSTO","SEP":"SEPTIEMBRE","OCT":"OCTUBRE","NOV":"NOVIEMBRE","DIC":"DICIEMBRE",
@@ -67,25 +60,21 @@ def normalizar_periodo(valor: str) -> str:
         return ""
     s = strip_accents(str(valor)).upper().strip()
     s = re.sub(r"\s+", " ", s)
-
     m = re.match(r"^(JAN|ENE|FEB|MAR|APR|ABR|MAY|JUN|JUL|AUG|AGO|SEP|OCT|NOV|DEC|DIC)[\s\-/]*([0-9]{2,4})$", s)
     if m:
         mes = MES_MAP.get(m.group(1), m.group(1))
         anio = _to_year4(m.group(2))
         return f"{mes} {anio}"
-
     m = re.match(r"^([0-1][0-9])[\s\-/]*([0-9]{2,4})$", s)
     if m and m.group(1) in MES_NUM:
         mes = MES_NUM[m.group(1)]
         anio = _to_year4(m.group(2))
         return f"{mes} {anio}"
-
     m = re.match(r"^([0-9]{4})[\s\-/]*([0-1][0-9])$", s)
     if m and m.group(2) in MES_NUM:
         mes = MES_NUM[m.group(2)]
         anio = m.group(1)
         return f"{mes} {anio}"
-
     return s
 
 MES_A_NUM = {"ENERO":1,"FEBRERO":2,"MARZO":3,"ABRIL":4,"MAYO":5,"JUNIO":6,"JULIO":7,"AGOSTO":8,"SEPTIEMBRE":9,"OCTUBRE":10,"NOVIEMBRE":11,"DICIEMBRE":12}
@@ -102,6 +91,12 @@ def periodo_to_date(s: str):
         return pd.Timestamp(year=an, month=mes, day=1)
     except Exception:
         return pd.NaT
+
+def last_nonempty(series: pd.Series) -> str:
+    for v in series.iloc[::-1]:
+        if str(v).strip():
+            return str(v)
+    return ""
 
 # ===================== Ninox helpers =====================
 def ninox_headers():
@@ -172,7 +167,7 @@ def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
         df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
     return df
 
-# ===================== Lectores de archivos =====================
+# ===================== Lectores =====================
 def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     def _n(x: str) -> str:
         x = strip_accents(str(x)).strip()
@@ -254,8 +249,7 @@ def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
 
 def leer_dosis(upload) -> Optional[pd.DataFrame]:
     if not upload: return None
-    name = upload.name.lower()
-    if name.endswith((".xlsx",".xls")):
+    if upload.name.lower().endswith((".xlsx",".xls")):
         df = pd.read_excel(upload)
     else:
         df = parse_csv_robust(upload)
@@ -265,12 +259,10 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
             .str.replace("(", "", regex=False).str.replace(")", "", regex=False)
             .str.replace(".", "", regex=False))
     df.columns = cols
-
     if "dosimeter" not in df.columns:
         for alt in ["dosimetro","codigo","codigodosimetro","codigo_dosimetro"]:
             if alt in df.columns:
                 df.rename(columns={alt:"dosimeter"}, inplace=True); break
-
     for cands, dest in [ (["hp10dosecorr","hp10dose","hp10"], "hp10dose"),
                          (["hp007dosecorr","hp007dose","hp007"], "hp0.07dose"),
                          (["hp3dosecorr","hp3dose","hp3"], "hp3dose") ]:
@@ -278,14 +270,13 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
             if c in df.columns: df.rename(columns={c:dest}, inplace=True); break
         if dest not in df.columns: df[dest] = 0.0
         else: df[dest] = pd.to_numeric(df[dest], errors="coerce").fillna(0.0)
-
     if "dosimeter" in df.columns:
         df["dosimeter"] = df["dosimeter"].astype(str).str.strip().str.upper()
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     return df
 
-# ===================== Construcción de registros =====================
+# ===================== Construcción base =====================
 def construir_registros(df_lista: pd.DataFrame,
                         df_dosis: pd.DataFrame,
                         periodos: List[str]) -> pd.DataFrame:
@@ -322,11 +313,16 @@ def construir_registros(df_lista: pd.DataFrame,
         if bool(r["_IS_CONTROL"]) and (not nombre):
             nombre = "CONTROL"
 
+        # Si es control y no tiene código de usuario, lo rellenamos con el dosímetro
+        cod_usuario = str(r.get("CÓDIGO DE USUARIO","") or "").strip()
+        if bool(r["_IS_CONTROL"]) and not cod_usuario:
+            cod_usuario = cod
+
         registros.append({
             "PERIODO DE LECTURA": r["PERIODO DE LECTURA"],
             "CLIENTE": r.get("CLIENTE",""),
             "CÓDIGO DE DOSÍMETRO": cod,
-            "CÓDIGO DE USUARIO": r.get("CÓDIGO DE USUARIO",""),
+            "CÓDIGO DE USUARIO": cod_usuario,
             "NOMBRE": nombre,
             "CÉDULA": r.get("CÉDULA",""),
             "FECHA DE LECTURA": fecha_str,
@@ -342,12 +338,12 @@ def construir_registros(df_lista: pd.DataFrame,
         df_final = df_final.sort_values(["_IS_CONTROL","NOMBRE","CÉDULA"], ascending=[False, True, True]).reset_index(drop=True)
     return df_final
 
-# ===================== Resta de CONTROL + Formato =====================
 def _is_control_name_session(x: str) -> bool:
     s = strip_accents(str(x or "")).upper()
     s = re.sub(r"\s+", " ", s).strip()
     return s.startswith("CONTROL")
 
+# ===================== Resta de CONTROL + Formato =====================
 def aplicar_resta_control_y_formato(
     df_final: pd.DataFrame,
     umbral_pm: float = 0.005,
@@ -397,47 +393,21 @@ def aplicar_resta_control_y_formato(
     def fmt(v):
         v = float(v)
         return "PM" if v < umbral_pm else f"{v:.2f}"
+
     out_view = out.copy()
     out_view["Hp (10)"]   = out_view["_Hp10_NUM"].map(fmt)
     out_view["Hp (0.07)"] = out_view["_Hp007_NUM"].map(fmt)
     out_view["Hp (3)"]    = out_view["_Hp3_NUM"].map(fmt)
 
-    df_ctrl_view = pd.DataFrame()
-    if not df_ctrl.empty:
-        df_ctrl_view = df_ctrl.merge(ctrl_means, on="PERIODO DE LECTURA", how="left")
-        for c in ["Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"]:
-            df_ctrl_view[c] = df_ctrl_view[c].fillna(0.0)
-        df_ctrl_view["_Hp10_NUM"]  = (df_ctrl_view["Hp (10)"]   - df_ctrl_view["Hp10_CTRL"]).clip(lower=0.0)
-        df_ctrl_view["_Hp007_NUM"] = (df_ctrl_view["Hp (0.07)"] - df_ctrl_view["Hp007_CTRL"]).clip(lower=0.0)
-        df_ctrl_view["_Hp3_NUM"]   = (df_ctrl_view["Hp (3)"]    - df_ctrl_view["Hp3_CTRL"]).clip(lower=0.0)
-        df_ctrl_view["Hp (10)"]    = df_ctrl_view["_Hp10_NUM"].map(fmt)
-        df_ctrl_view["Hp (0.07)"]  = df_ctrl_view["_Hp007_NUM"].map(fmt)
-        df_ctrl_view["Hp (3)"]     = df_ctrl_view["_Hp3_NUM"].map(fmt)
+    df_num = out[[ "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
+                   "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+                   "TIPO DE DOSÍMETRO","FECHA DE LECTURA"]].copy()
 
-    df_vista = pd.concat([df_ctrl_view, out_view], ignore_index=True, sort=False)
-    if not df_vista.empty:
-        df_vista["__is_control__"] = df_vista["NOMBRE"].apply(_is_control_name_session)
-        df_vista = df_vista.sort_values(by=["__is_control__","NOMBRE","CÉDULA"], ascending=[False, True, True]).drop(columns=["__is_control__"])
-
-    df_num = out[[
-        "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
-        "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-        "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
-    ]].copy()
-
-    return df_vista, df_num
+    # Devolvemos vista (texto con PM) y numéricos (para sumas)
+    return pd.concat([df_ctrl, out_view], ignore_index=True, sort=False), df_num
 
 # ===================== Consolidación para subir =====================
 def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
-    """
-    Consolida para subir a Ninox.
-    - PERSONAS: suma por periodo/usuario de las dosis corregidas.
-    - CONTROL: promedio por periodo de las filas de control,
-      conservando CÓDIGO DE USUARIO y CÉDULA si existen (último no vacío).
-      Si el CÓDIGO DE USUARIO del control está vacío, se rellena con:
-         1) CÓDIGO DE DOSÍMETRO del control; si no hay,
-         2) 'CONTROL'.
-    """
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
 
@@ -446,20 +416,10 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
     per_consol = pd.DataFrame()
     if not personas_num.empty:
         per_consol = personas_num.groupby(["PERIODO DE LECTURA","CÓDIGO DE USUARIO"], as_index=False).agg({
-            "CLIENTE":"last",
-            "NOMBRE":"last",
-            "CÉDULA":"last",
-            "CÓDIGO DE DOSÍMETRO":"last",
-            "TIPO DE DOSÍMETRO":"last",
-            "FECHA DE LECTURA":"last",
-            "_Hp10_NUM":"sum",
-            "_Hp007_NUM":"sum",
-            "_Hp3_NUM":"sum"
-        }).rename(columns={
-            "_Hp10_NUM":"Hp (10)",
-            "_Hp007_NUM":"Hp (0.07)",
-            "_Hp3_NUM":"Hp (3)"
-        })
+            "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last","CÓDIGO DE DOSÍMETRO":"last",
+            "TIPO DE DOSÍMETRO":"last","FECHA DE LECTURA":"last",
+            "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
+        }).rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"})
 
     # CONTROL
     control_v = df_vista[df_vista["NOMBRE"].astype(str).str.upper().str.startswith("CONTROL")].copy()
@@ -467,14 +427,12 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
     if not control_v.empty:
         for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
             control_v[h] = control_v[h].apply(hp_to_num)
-
         def _last_nonempty(series: pd.Series) -> str:
             for v in series.iloc[::-1]:
                 s = str(v).strip()
                 if s:
                     return s
             return ""
-
         ctrl_consol = control_v.groupby(["PERIODO DE LECTURA"], as_index=False).agg({
             "CLIENTE":"last",
             "CÓDIGO DE DOSÍMETRO":"first",
@@ -482,18 +440,13 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
             "CÉDULA": _last_nonempty,
             "TIPO DE DOSÍMETRO":"last",
             "FECHA DE LECTURA":"last",
-            "Hp (10)":"mean",
-            "Hp (0.07)":"mean",
-            "Hp (3)":"mean"
+            "Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"
         })
-
         def _fill_usercode(row):
             cu = str(row.get("CÓDIGO DE USUARIO","") or "").strip()
-            if cu:
-                return cu
+            if cu: return cu
             cd = str(row.get("CÓDIGO DE DOSÍMETRO","") or "").strip()
             return cd if cd else "CONTROL"
-
         ctrl_consol["CÓDIGO DE USUARIO"] = ctrl_consol.apply(_fill_usercode, axis=1)
         ctrl_consol["NOMBRE"] = "CONTROL"
 
@@ -507,15 +460,57 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
     for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
         out[h] = out[h].map(_fmt)
 
-    orden_pref = [
-        "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE",
-        "CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO","Hp (10)","Hp (0.07)","Hp (3)"
-    ]
+    orden_pref = ["PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE",
+                  "CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO","Hp (10)","Hp (0.07)","Hp (3)"]
     cols = [c for c in orden_pref if c in out.columns] + [c for c in out.columns if c not in orden_pref]
     out = out[cols]
     sort_keys = [c for c in ["PERIODO DE LECTURA","NOMBRE","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO"] if c in out.columns]
     out = out.sort_values(sort_keys).reset_index(drop=True)
     return out
+
+# ===================== Exportador de Reporte Final =====================
+def _reindex_cols(df: pd.DataFrame, pref: List[str]) -> pd.DataFrame:
+    if df is None or df.empty: 
+        return df
+    cols = [c for c in pref if c in df.columns] + [c for c in df.columns if c not in pref]
+    return df[cols]
+
+def construir_archivo_reporte(per_view: pd.DataFrame, ctrl_view: pd.DataFrame, nombre_base: str = "REPORTE_FINAL") -> Tuple[str, bytes, str]:
+    pref_personas = [
+        "CÓDIGO DE USUARIO","CLIENTE","NOMBRE","CÉDULA",
+        "Hp (10)","Hp (0.07)","Hp (3)",
+        "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+        "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
+    ]
+    pref_control = [
+        "CÓDIGO DE DOSÍMETRO","CLIENTE",
+        "Hp (10)","Hp (0.07)","Hp (3)",
+        "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+        "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
+    ]
+    per_view = _reindex_cols(per_view, pref_personas)
+    ctrl_view = _reindex_cols(ctrl_view, pref_control)
+
+    # Excel (openpyxl). Si no está, cae a ZIP con CSV.
+    try:
+        bio = BytesIO()
+        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+            (per_view if per_view is not None else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Personas")
+            (ctrl_view if ctrl_view is not None else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Control")
+        bio.seek(0)
+        fname = f"{nombre_base}.xlsx"
+        return fname, bio.read(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    except Exception:
+        import zipfile
+        bio = BytesIO()
+        with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            per_csv  = (per_view if per_view is not None else pd.DataFrame()).to_csv(index=False).encode("utf-8-sig")
+            ctrl_csv = (ctrl_view if ctrl_view is not None else pd.DataFrame()).to_csv(index=False).encode("utf-8-sig")
+            zf.writestr("Personas.csv", per_csv)
+            zf.writestr("Control.csv", ctrl_csv)
+        bio.seek(0)
+        fname = f"{nombre_base}.zip"
+        return fname, bio.read(), "application/zip"
 
 # ===================== UI: Tabs =====================
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
@@ -621,10 +616,8 @@ with tab1:
                         "Hp (3)": _hp_value_for_upload(row.get("Hp (3)"), subir_pm_como_texto),
                     }
                     rows.append({"fields": fields})
-
                 with st.spinner("Subiendo a Ninox..."):
                     res = ninox_insert(TABLE_WRITE_NAME, rows, batch_size=300)
-
                 if res.get("ok"):
                     st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s).")
                     st.toast("¡Datos enviados a Ninox!", icon="✅")
@@ -640,6 +633,8 @@ with tab2:
         "Leer directamente de Ninox (tabla BASE DE DATOS)",
     ], index=0)
 
+    per_view, ctrl_view = pd.DataFrame(), pd.DataFrame()
+
     if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
         try:
             with st.spinner("Leyendo registros desde Ninox…"):
@@ -649,6 +644,7 @@ with tab2:
             if df_nx.empty:
                 st.warning("No se recibieron registros desde Ninox.")
             else:
+                # PERSONAS
                 personas = df_nx[df_nx["NOMBRE"].astype(str).str.upper().str.startswith("CONTROL") == False].copy()
                 if not personas.empty:
                     for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
@@ -661,8 +657,7 @@ with tab2:
                     })
                     personas["__fecha__"] = personas["PERIODO DE LECTURA"].map(periodo_to_date)
                     idx_last = personas.groupby("CÓDIGO DE USUARIO")["__fecha__"].idxmax()
-                    per_last = (personas.loc[idx_last, ["CÓDIGO DE USUARIO","Hp (10)","Hp (0.07)","Hp (3)"]]
-                                .rename(columns={"Hp (10)":"Hp (10)","Hp (0.07)":"Hp (0.07)","Hp (3)":"Hp (3)"}))
+                    per_last = (personas.loc[idx_last, ["CÓDIGO DE USUARIO","Hp (10)","Hp (0.07)","Hp (3)"]])
                     per_view = per_anual.merge(per_last, on="CÓDIGO DE USUARIO", how="left")
                     per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
                     per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
@@ -681,6 +676,7 @@ with tab2:
                 else:
                     st.info("No hay filas de personas (Ninox).")
 
+                # CONTROL
                 control = df_nx[df_nx["NOMBRE"].astype(str).str.upper().str.startswith("CONTROL")].copy()
                 if not control.empty:
                     for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
@@ -746,7 +742,7 @@ with tab2:
             else:
                 st.info("No hay filas de personas.")
 
-            control_v = df_vista[df_vista["NOMBRE"].apply(_is_control_name_session)].copy()
+            control_v = st.session_state.df_final_vista[st.session_state.df_final_vista["NOMBRE"].apply(_is_control_name_session)].copy()
             if not control_v.empty:
                 for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
                     control_v[h] = control_v[h].apply(hp_to_num)
@@ -774,4 +770,21 @@ with tab2:
                 st.dataframe(ctrl_view, use_container_width=True)
             else:
                 st.info("No hay filas de CONTROL en la sesión.")
+
+    # ===== Botón de descarga del Reporte Final =====
+    nombre_archivo, archivo_bytes, mime = construir_archivo_reporte(
+        per_view if 'per_view' in locals() and isinstance(per_view, pd.DataFrame) else pd.DataFrame(),
+        ctrl_view if 'ctrl_view' in locals() and isinstance(ctrl_view, pd.DataFrame) else pd.DataFrame(),
+        nombre_base=f"REPORTE_FINAL_{datetime.now().strftime('%Y%m%d')}"
+    )
+    st.download_button(
+        "⬇️ Descargar reporte final (Excel)",
+        data=archivo_bytes,
+        file_name=nombre_archivo,
+        mime=mime,
+        type="primary",
+        disabled=( (('per_view' in locals()) and isinstance(per_view, pd.DataFrame) and not per_view.empty) or
+                   (('ctrl_view' in locals()) and isinstance(ctrl_view, pd.DataFrame) and not ctrl_view.empty) ) == False
+    )
+
 
