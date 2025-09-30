@@ -26,7 +26,6 @@ def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 def pmfmt(v, thr: float = 0.005) -> str:
-    """Formatea numérico con 2 decimales; <umbral → PM."""
     try:
         f = float(v)
     except Exception:
@@ -35,7 +34,6 @@ def pmfmt(v, thr: float = 0.005) -> str:
     return "PM" if f < thr else f"{f:.2f}"
 
 def hp_to_num(x) -> float:
-    """Convierte 'PM' o vacío a 0.0; si es número, float."""
     if x is None:
         return 0.0
     s = str(x).strip().upper()
@@ -46,7 +44,6 @@ def hp_to_num(x) -> float:
     except Exception:
         return 0.0
 
-# ---------- Normalización de PERIODO ----------
 MES_MAP = {
     "ENE":"ENERO","FEB":"FEBRERO","MAR":"MARZO","ABR":"ABRIL","MAY":"MAYO","JUN":"JUNIO",
     "JUL":"JULIO","AGO":"AGOSTO","SEP":"SEPTIEMBRE","OCT":"OCTUBRE","NOV":"NOVIEMBRE","DIC":"DICIEMBRE",
@@ -426,16 +423,9 @@ def aplicar_resta_control_y_formato(
 
 # ===================== Consolidación para subir =====================
 def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
-    """
-    Consolida para subir a Ninox:
-    - PERSONAS: suma por periodo/usuario de las dosis corregidas.
-    - CONTROL: promedio por periodo de las filas de control. Mantiene CÓDIGO DE USUARIO si existe;
-      si falta, usa el CÓDIGO DE DOSÍMETRO o 'CONTROL'.
-    """
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
 
-    # PERSONAS
     personas_num = df_num[df_num["NOMBRE"].astype(str).str.upper().str.startswith("CONTROL") == False].copy()
     per_consol = pd.DataFrame()
     if not personas_num.empty:
@@ -455,7 +445,6 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
             "_Hp3_NUM":"Hp (3)"
         })
 
-    # CONTROL
     control_v = df_vista[df_vista["NOMBRE"].astype(str).str.upper().str.startswith("CONTROL")].copy()
     ctrl_consol = pd.DataFrame()
     if not control_v.empty:
@@ -511,18 +500,12 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
     out = out.sort_values(sort_keys).reset_index(drop=True)
     return out
 
-# ===================== Export helpers (Excel opcional) =====================
+# ===================== Export helpers =====================
 def exportar_excel_bytes(df: pd.DataFrame) -> Optional[bytes]:
-    """
-    Intenta exportar a Excel usando openpyxl o xlsxwriter solo si existen.
-    Si no hay motores, devuelve None (la app ofrece solo CSV).
-    """
     has_openpyxl   = importlib.util.find_spec("openpyxl")   is not None
     has_xlsxwriter = importlib.util.find_spec("xlsxwriter") is not None
-
     if not (has_openpyxl or has_xlsxwriter):
-        return None  # sin motores → no intentamos Excel
-
+        return None
     engine = "openpyxl" if has_openpyxl else "xlsxwriter"
     try:
         buf = BytesIO()
@@ -655,33 +638,50 @@ with tab2:
         "Leer directamente de Ninox (tabla BASE DE DATOS)",
     ], index=0)
 
-    cliente_filtro = st.text_input("Filtrar por CLIENTE (opcional; coincide parcialmente)", value="").strip()
+    # --- Cargar DF base según fuente (sin filtrar cliente aún) ---
+    df_base = pd.DataFrame()
+    if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
+        try:
+            with st.spinner("Leyendo registros desde Ninox…"):
+                recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000)
+                df_base = ninox_records_to_df(recs)
+        except Exception as e:
+            st.error(f"Error leyendo Ninox: {e}")
+            df_base = pd.DataFrame()
+    else:
+        # Usar datos procesados en sesión
+        df_vista = st.session_state.get("df_final_vista")
+        if df_vista is not None and not df_vista.empty:
+            df_base = df_vista.copy()
 
-    def construir_reporte_desde_df(df_src: pd.DataFrame) -> pd.DataFrame:
+    # --- Selector de CLIENTE ---
+    if df_base is not None and not df_base.empty and "CLIENTE" in df_base.columns:
+        clientes = sorted([c for c in df_base["CLIENTE"].dropna().astype(str).unique().tolist() if c.strip()])
+        cliente_opciones = ["(Todos)"] + clientes
+        cliente_sel = st.selectbox("Filtrar por CLIENTE (opcional)", cliente_opciones, index=0)
+    else:
+        cliente_sel = "(Todos)"
+        st.info("No hay datos disponibles para listar clientes.")
+
+    def construir_reporte_desde_df(df_src: pd.DataFrame, cliente_elegido: str) -> pd.DataFrame:
         if df_src is None or df_src.empty:
             return pd.DataFrame()
 
-        # Filtro cliente si aplica
-        if cliente_filtro:
-            df_src = df_src[df_src["CLIENTE"].astype(str).str.contains(cliente_filtro, case=False, na=False)].copy()
+        if cliente_elegido != "(Todos)" and "CLIENTE" in df_src.columns:
+            df_src = df_src[df_src["CLIENTE"].astype(str) == cliente_elegido].copy()
             if df_src.empty:
                 return pd.DataFrame()
 
-        # Personas (no CONTROL)
         personas = df_src[df_src["NOMBRE"].astype(str).str.upper().str.startswith("CONTROL") == False].copy()
-        # Controles
         controles = df_src[df_src["NOMBRE"].astype(str).str.upper().str.startswith("CONTROL")].copy()
 
-        # Asegurar numéricos
         for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
             if h in personas.columns:
                 personas[h] = personas[h].apply(hp_to_num)
             if h in controles.columns:
                 controles[h] = controles[h].apply(hp_to_num)
 
-        # Personas: sumas anuales por usuario
-        per_anual = pd.DataFrame()
-        per_last  = pd.DataFrame()
+        per_personas = pd.DataFrame()
         if not personas.empty:
             per_anual = personas.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
                 "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last",
@@ -693,8 +693,7 @@ with tab2:
             personas["__fecha__"] = personas["PERIODO DE LECTURA"].map(periodo_to_date)
             idx_last = personas.groupby("CÓDIGO DE USUARIO")["__fecha__"].idxmax()
             per_last = (personas.loc[idx_last, ["CÓDIGO DE USUARIO","PERIODO DE LECTURA","FECHA DE LECTURA",
-                                                "Hp (10)","Hp (0.07)","Hp (3)","CÓDIGO DE DOSÍMETRO","TIPO DE DOSÍMETRO"]]
-                        .rename(columns={"Hp (10)":"Hp (10)","Hp (0.07)":"Hp (0.07)","Hp (3)":"Hp (3)"}))
+                                                "Hp (10)","Hp (0.07)","Hp (3)","CÓDIGO DE DOSÍMETRO","TIPO DE DOSÍMETRO"]])
             per_personas = per_anual.merge(per_last, on="CÓDIGO DE USUARIO", how="left")
             per_personas["Hp (10) DE POR VIDA"]   = per_personas["Hp (10) ANUAL"]
             per_personas["Hp (0.07) DE POR VIDA"] = per_personas["Hp (0.07) ANUAL"]
@@ -708,7 +707,6 @@ with tab2:
                 "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
             ])
 
-        # Controles: sumas anuales por CODIGO DE DOSIMETRO
         ctrl_view = pd.DataFrame()
         if not controles.empty:
             ctrl_anual = controles.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
@@ -724,8 +722,6 @@ with tab2:
             ctrl_view["Hp (10) DE POR VIDA"]   = ctrl_view["Hp (10) ANUAL"]
             ctrl_view["Hp (0.07) DE POR VIDA"] = ctrl_view["Hp (0.07) ANUAL"]
             ctrl_view["Hp (3) DE POR VIDA"]    = ctrl_view["Hp (3) ANUAL"]
-            # Renombrar para tener mismas columnas que personas
-            ctrl_view = ctrl_view.rename(columns={"CÓDIGO DE DOSÍMETRO":"CÓDIGO DE DOSÍMETRO"})
             ctrl_view = ctrl_view[[
                 "CÓDIGO DE USUARIO","CLIENTE","NOMBRE","CÉDULA",
                 "CÓDIGO DE DOSÍMETRO","TIPO DE DOSÍMETRO","PERIODO DE LECTURA","FECHA DE LECTURA",
@@ -744,14 +740,12 @@ with tab2:
 
         reporte = pd.concat([ctrl_view, per_personas], ignore_index=True, sort=False)
 
-        # Formato/PM
         for c in ["Hp (10)","Hp (0.07)","Hp (3)",
                   "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
                   "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
             if c in reporte.columns:
                 reporte[c] = reporte[c].map(pmfmt)
 
-        # Orden columnas y orden por CODIGO DE DOSÍMETRO (como pediste)
         col_orden = ["CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","CLIENTE","NOMBRE","CÉDULA",
                      "PERIODO DE LECTURA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
                      "Hp (10)","Hp (0.07)","Hp (3)",
@@ -759,7 +753,6 @@ with tab2:
                      "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]
         reporte = reporte[[c for c in col_orden if c in reporte.columns]]
 
-        # Sort: por CÓDIGO DE DOSÍMETRO; si falta, por CÓDIGO DE USUARIO
         if "CÓDIGO DE DOSÍMETRO" in reporte.columns:
             reporte = reporte.sort_values(["CÓDIGO DE DOSÍMETRO","NOMBRE","CÓDIGO DE USUARIO"], na_position="last").reset_index(drop=True)
         elif "CÓDIGO DE USUARIO" in reporte.columns:
@@ -767,54 +760,31 @@ with tab2:
 
         return reporte
 
-    if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
-        try:
-            with st.spinner("Leyendo registros desde Ninox…"):
-                recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000)
-                df_nx = ninox_records_to_df(recs)
-            if df_nx.empty:
-                st.warning("No se recibieron registros desde Ninox.")
-                reporte = pd.DataFrame()
-            else:
-                reporte = construir_reporte_desde_df(df_nx)
-        except Exception as e:
-            st.error(f"Error leyendo Ninox: {e}")
-            reporte = pd.DataFrame()
-    else:
-        # Datos de la sesión (ya corregidos con el control)
-        df_vista = st.session_state.get("df_final_vista")
-        df_num   = st.session_state.get("df_final_num")
-        if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
-            st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
-            reporte = pd.DataFrame()
-        else:
-            # Armar DF similar al de Ninox (con valores ya corregidos PM/num en df_vista y num en df_num)
-            base = df_vista.copy()
-            base = base.rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"})
-            reporte = construir_reporte_desde_df(base)
-
-    if reporte is None or reporte.empty:
+    # Construir y mostrar reporte (filtrado por el cliente elegido)
+    if df_base is None or df_base.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
-        st.dataframe(reporte, use_container_width=True)
-        st.markdown("---")
-        # Descargar CSV (siempre)
-        csv_bytes = reporte.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            "⬇️ Descargar Reporte (CSV)",
-            data=csv_bytes,
-            file_name=f"Reporte_Final_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-            mime="text/csv",
-        )
-        # Descargar Excel (solo si hay motor)
-        excel_bytes = exportar_excel_bytes(reporte)
-        if excel_bytes:
-            st.download_button(
-                "⬇️ Descargar Reporte (Excel)",
-                data=excel_bytes,
-                file_name=f"Reporte_Final_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        reporte = construir_reporte_desde_df(df_base, cliente_sel)
+        if reporte is None or reporte.empty:
+            st.info("No hay datos para mostrar con ese filtro de cliente.")
         else:
-            st.info("Para Excel instala `openpyxl` (recomendado) o `xlsxwriter`. Mientras tanto, usa el CSV.")
+            st.dataframe(reporte, use_container_width=True)
+            st.markdown("---")
+            csv_bytes = reporte.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "⬇️ Descargar Reporte (CSV)",
+                data=csv_bytes,
+                file_name=f"Reporte_Final_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+            )
+            excel_bytes = exportar_excel_bytes(reporte)
+            if excel_bytes:
+                st.download_button(
+                    "⬇️ Descargar Reporte (Excel)",
+                    data=excel_bytes,
+                    file_name=f"Reporte_Final_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.info("Para Excel instala `openpyxl` (recomendado) o `xlsxwriter`. Mientras tanto, usa el CSV.")
 
