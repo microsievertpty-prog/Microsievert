@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import re
-import io
 import unicodedata
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,42 +20,36 @@ TABLE_WRITE_NAME = "BASE DE DATOS"
 st.set_page_config(page_title="Microsievert — Dosimetría", page_icon="🧪", layout="wide")
 st.title("🧪 Carga y Cruce de Dosis → Ninox (**BASE DE DATOS**)")
 
-# ===================== Helpers =====================
+# ===================== Utilidades =====================
 def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
+def pmfmt(v, thr: float = 0.005) -> str:
+    """Formatea con 2 decimales; si < umbral → PM (una sola vez)."""
+    try:
+        f = float(v)
+    except Exception:
+        s = str(v).strip().upper()
+        return "PM" if s == "PM" or s == "" else s
+    return "PM" if f < thr else f"{f:.2f}"
+
 def hp_to_num(x) -> float:
+    """Convierte 'PM'/vacío a 0.0 para sumar; números → float."""
     if x is None:
         return 0.0
     s = str(x).strip().upper()
-    if s in ("", "PM", "NONE", "NAN"):
+    if s in ("", "PM"):
         return 0.0
     try:
         return float(s)
     except Exception:
         return 0.0
 
-def pmfmt2(v, thr: float = 0.005) -> str:
-    try:
-        f = float(v)
-    except Exception:
-        s = str(v).strip()
-        return "PM" if s == "" else s
-    return "PM" if f < thr else f"{f:.2f}"
-
 def last_nonempty(series: pd.Series) -> str:
     for v in series.iloc[::-1]:
         if str(v).strip():
             return str(v)
     return ""
-
-def is_control_name(x: str) -> bool:
-    s = strip_accents(str(x or "")).upper()
-    s = re.sub(r"\s+", " ", s).strip()
-    return s.startswith("CONTROL")
-
-def safe_cols(df: pd.DataFrame, cols: List[str]) -> List[str]:
-    return [c for c in cols if c in df.columns]
 
 # ---------- Normalización de PERIODO ----------
 MES_MAP = {
@@ -171,19 +164,11 @@ def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
     rows = []
     for rec in records:
         f = rec.get("fields", {}) or {}
-        rows.append({
-            "PERIODO DE LECTURA": f.get("PERIODO DE LECTURA"),
-            "CLIENTE": f.get("CLIENTE"),
-            "CÓDIGO DE DOSÍMETRO": f.get("CÓDIGO DE DOSÍMETRO"),
-            "CÓDIGO DE USUARIO": f.get("CÓDIGO DE USUARIO"),
-            "NOMBRE": f.get("NOMBRE"),
-            "CÉDULA": f.get("CÉDULA"),
-            "FECHA DE LECTURA": f.get("FECHA DE LECTURA"),
-            "TIPO DE DOSÍMETRO": f.get("TIPO DE DOSÍMETRO"),
-            "Hp (10)": f.get("Hp (10)"),
-            "Hp (0.07)": f.get("Hp (0.07)"),
-            "Hp (3)": f.get("Hp (3)"),
-        })
+        rows.append({k: f.get(k) for k in [
+            "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO",
+            "NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
+            "Hp (10)","Hp (0.07)","Hp (3)"
+        ]})
     df = pd.DataFrame(rows)
     if "PERIODO DE LECTURA" in df.columns:
         df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
@@ -258,8 +243,13 @@ def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
     out["TIPO DE DOSÍMETRO"] = df[c_tipo].astype(str).str.strip() if c_tipo else ""
     out["ETIQUETA"]          = df[c_etq].astype(str).str.strip() if c_etq else ""
 
+    def _is_control_name(x: str) -> bool:
+        s = strip_accents(str(x or "")).upper()
+        s = re.sub(r"\s+", " ", s).strip()
+        return s.startswith("CONTROL")
+
     def _is_ctrl(r):
-        return is_control_name(r.get("NOMBRE","")) or is_control_name(r.get("ETIQUETA",""))
+        return _is_control_name(r.get("NOMBRE","")) or _is_control_name(r.get("ETIQUETA",""))
 
     out["_IS_CONTROL"] = out.apply(_is_ctrl, axis=1)
     return out
@@ -355,11 +345,17 @@ def construir_registros(df_lista: pd.DataFrame,
     return df_final
 
 # ===================== Resta de CONTROL + Formato =====================
+def _is_control_name_session(x: str) -> bool:
+    s = strip_accents(str(x or "")).upper()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.startswith("CONTROL")
+
 def aplicar_resta_control_y_formato(
     df_final: pd.DataFrame,
     umbral_pm: float = 0.005,
     manual_ctrl: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Devuelve (df_vista_formateado, df_num_corregido)."""
     if df_final is None or df_final.empty:
         return df_final, df_final
 
@@ -371,9 +367,9 @@ def aplicar_resta_control_y_formato(
     if "PERIODO DE LECTURA" in df.columns:
         df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
 
-    is_ctrl = df["NOMBRE"].apply(is_control_name)
-    df_ctrl = df[is_ctrl].copy()
-    df_per  = df[~is_ctrl].copy()
+    is_control = df["NOMBRE"].apply(_is_control_name_session)
+    df_ctrl = df[is_control].copy()
+    df_per  = df[~is_control].copy()
 
     ctrl_means = pd.DataFrame(columns=["PERIODO DE LECTURA","Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"])
     if not df_ctrl.empty:
@@ -401,205 +397,138 @@ def aplicar_resta_control_y_formato(
             out["_Hp007_NUM"] = out["Hp (0.07)"]
             out["_Hp3_NUM"]   = out["Hp (3)"]
 
+    def fmt(v):
+        v = float(v)
+        return "PM" if v < umbral_pm else f"{v:.2f}"
     out_view = out.copy()
-    out_view["Hp (10)"]   = out_view["_Hp10_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
-    out_view["Hp (0.07)"] = out_view["_Hp007_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
-    out_view["Hp (3)"]    = out_view["_Hp3_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
+    out_view["Hp (10)"]   = out_view["_Hp10_NUM"].map(fmt)
+    out_view["Hp (0.07)"] = out_view["_Hp007_NUM"].map(fmt)
+    out_view["Hp (3)"]    = out_view["_Hp3_NUM"].map(fmt)
 
-    df_ctrl_view = pd.DataFrame()
-    if not df_ctrl.empty:
-        df_ctrl_view = df_ctrl.merge(ctrl_means, on="PERIODO DE LECTURA", how="left")
-        for c in ["Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"]:
-            df_ctrl_view[c] = df_ctrl_view[c].fillna(0.0)
-        df_ctrl_view["_Hp10_NUM"]  = (df_ctrl_view["Hp (10)"]   - df_ctrl_view["Hp10_CTRL"]).clip(lower=0.0)
-        df_ctrl_view["_Hp007_NUM"] = (df_ctrl_view["Hp (0.07)"] - df_ctrl_view["Hp007_CTRL"]).clip(lower=0.0)
-        df_ctrl_view["_Hp3_NUM"]   = (df_ctrl_view["Hp (3)"]    - df_ctrl_view["Hp3_CTRL"]).clip(lower=0.0)
-        df_ctrl_view["Hp (10)"]    = df_ctrl_view["_Hp10_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
-        df_ctrl_view["Hp (0.07)"]  = df_ctrl_view["_Hp007_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
-        df_ctrl_view["Hp (3)"]     = df_ctrl_view["_Hp3_NUM"].map(lambda v: pmfmt2(v, umbral_pm))
+    # Vista de control (ya formateada con PM/2 decimales)
+    df_ctrl_view = df_ctrl.copy()
+    df_ctrl_view["Hp (10)"]   = df_ctrl_view["Hp (10)"].map(fmt)
+    df_ctrl_view["Hp (0.07)"] = df_ctrl_view["Hp (0.07)"].map(fmt)
+    df_ctrl_view["Hp (3)"]    = df_ctrl_view["Hp (3)"].map(fmt)
 
     df_vista = pd.concat([df_ctrl_view, out_view], ignore_index=True, sort=False)
     if not df_vista.empty:
-        df_vista["__is_control__"] = df_vista["NOMBRE"].apply(is_control_name)
+        df_vista["__is_control__"] = df_vista["NOMBRE"].apply(_is_control_name_session)
         df_vista = df_vista.sort_values(by=["__is_control__","NOMBRE","CÉDULA"], ascending=[False, True, True]).drop(columns=["__is_control__"])
 
-    df_num = out[[ "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
-                   "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-                   "TIPO DE DOSÍMETRO","FECHA DE LECTURA" ]].copy()
+    df_num = out[[
+        "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
+        "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
+        "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
+    ]].copy()
 
     return df_vista, df_num
 
-# ===================== Consolidación para subir =====================
-def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
-    if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
-        return pd.DataFrame()
-
-    # PERSONAS
-    personas_num = df_num[~df_num["NOMBRE"].apply(is_control_name)].copy()
-    per_consol = pd.DataFrame()
-    if not personas_num.empty:
-        per_consol = personas_num.groupby(["PERIODO DE LECTURA","CÓDIGO DE USUARIO"], as_index=False).agg({
-            "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last","CÓDIGO DE DOSÍMETRO":"last",
-            "TIPO DE DOSÍMETRO":"last","FECHA DE LECTURA":"last",
-            "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
-        }).rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"})
-
-    # CONTROL
-    control_v = df_vista[df_vista["NOMBRE"].apply(is_control_name)].copy()
-    ctrl_consol = pd.DataFrame()
-    if not control_v.empty:
-        for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-            control_v[h] = control_v[h].apply(hp_to_num)
-
-        def _last_nonempty(series: pd.Series) -> str:
-            for v in series.iloc[::-1]:
-                s = str(v).strip()
-                if s:
-                    return s
-            return ""
-
-        ctrl_consol = control_v.groupby(["PERIODO DE LECTURA"], as_index=False).agg({
-            "CLIENTE":"last",
-            "CÓDIGO DE DOSÍMETRO":"first",
-            "CÓDIGO DE USUARIO": _last_nonempty,
-            "CÉDULA": _last_nonempty,
-            "TIPO DE DOSÍMETRO":"last",
-            "FECHA DE LECTURA":"last",
-            "Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"
-        })
-
-        def _fill_usercode(row):
-            cu = str(row.get("CÓDIGO DE USUARIO","") or "").strip()
-            if cu:
-                return cu
-            cd = str(row.get("CÓDIGO DE DOSÍMETRO","") or "").strip()
-            return cd if cd else "CONTROL"
-
-        ctrl_consol["CÓDIGO DE USUARIO"] = ctrl_consol.apply(_fill_usercode, axis=1)
-        ctrl_consol["NOMBRE"] = "CONTROL"
-
-    out = pd.concat([ctrl_consol, per_consol], ignore_index=True, sort=False)
-    if out.empty:
-        return out
-
-    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-        out[h] = out[h].map(lambda v: pmfmt2(v, umbral_pm))
-
-    orden_pref = [
-        "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE",
-        "CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO","Hp (10)","Hp (0.07)","Hp (3)"
-    ]
-    cols = [c for c in orden_pref if c in out.columns] + [c for c in out.columns if c not in orden_pref]
-    out = out[cols]
-    sort_keys = [c for c in ["PERIODO DE LECTURA","NOMBRE","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO"] if c in out.columns]
-    out = out.sort_values(sort_keys).reset_index(drop=True)
-    return out
-
-# ===================== REPORTE ÚNICO (CONTROL primero) =====================
+# ===================== Consolidación y REPORTE ÚNICO =====================
 def construir_reporte_unico(
-    df_vista: pd.DataFrame,
-    df_num: pd.DataFrame,
-    umbral_pm: float = 0.005,
-    agrupar_control_por: str = "CLIENTE",   # 1 fila de CONTROL por cliente
+    fuente_df: pd.DataFrame,
+    tipo_fuente: str = "session",  # "session" o "ninox"
 ) -> pd.DataFrame:
-    if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
-        return pd.DataFrame()
+    """
+    Construye un único reporte (CONTROL + Personas) con:
+    - CÓDIGO DE DOSÍMETRO y CÓDIGO DE USUARIO
+    - Hp (...) (último período)
+    - Hp (...) ANUAL (suma por usuario / por dosímetro si CONTROL)
+    - Hp (...) DE POR VIDA = Hp (...) ANUAL
+    Orden: CONTROL primero y por CÓDIGO DE DOSÍMETRO natural.
+    """
+    df = fuente_df.copy()
+    if df.empty:
+        return df
 
-    # ----- PERSONAS -----
-    personas_num = df_num[~df_num["NOMBRE"].apply(is_control_name)].copy()
-    if not personas_num.empty:
-        per_anual = personas_num.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
+    # Convertir PM→0.0 para sumar anual/vida
+    for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+        if h in df.columns:
+            df[h] = df[h].apply(hp_to_num)
+
+    # Clasifica
+    is_control = df["NOMBRE"].astype(str).str.upper().str.startswith("CONTROL")
+
+    # Personas → anual por CÓDIGO DE USUARIO
+    per = df[~is_control].copy()
+    per_view = pd.DataFrame()
+    if not per.empty:
+        per["__fecha__"] = per["PERIODO DE LECTURA"].map(periodo_to_date)
+        # anual (sumas)
+        per_anual = per.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
             "CLIENTE":"last","NOMBRE":"last","CÉDULA":"last","CÓDIGO DE DOSÍMETRO":"last",
-            "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
-        }).rename(columns={"_Hp10_NUM":"Hp (10) ANUAL","_Hp007_NUM":"Hp (0.07) ANUAL","_Hp3_NUM":"Hp (3) ANUAL"})
-        personas_num["__fecha__"] = personas_num["PERIODO DE LECTURA"].map(periodo_to_date)
-        idx_last = personas_num.groupby("CÓDIGO DE USUARIO")["__fecha__"].idxmax()
-        per_last = personas_num.loc[idx_last, safe_cols(personas_num, [
-            "CÓDIGO DE USUARIO","PERIODO DE LECTURA","_Hp10_NUM","_Hp007_NUM","_Hp3_NUM",
-            "FECHA DE LECTURA","TIPO DE DOSÍMETRO"
-        ])].rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"})
+            "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
+        }).rename(columns={"Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"})
+        # último mes (para mostrar Hp(...) corriente)
+        idx_last = per.groupby("CÓDIGO DE USUARIO")["__fecha__"].idxmax()
+        per_last = per.loc[idx_last, ["CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","Hp (10)","Hp (0.07)","Hp (3)"]]
         per_view = per_anual.merge(per_last, on="CÓDIGO DE USUARIO", how="left")
-        for c in safe_cols(per_view, ["Hp (10)","Hp (0.07)","Hp (3)","Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL"]):
-            per_view[c] = per_view[c].map(lambda v: pmfmt2(v, umbral_pm))
+        # vida = anual
         per_view["Hp (10) DE POR VIDA"]   = per_view["Hp (10) ANUAL"]
         per_view["Hp (0.07) DE POR VIDA"] = per_view["Hp (0.07) ANUAL"]
         per_view["Hp (3) DE POR VIDA"]    = per_view["Hp (3) ANUAL"]
-        personas_final = per_view[safe_cols(per_view, [
-            "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE","CÉDULA",
-            "FECHA DE LECTURA","TIPO DE DOSÍMETRO",
-            "Hp (10)","Hp (0.07)","Hp (3)",
-            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
-        ])]
-    else:
-        personas_final = pd.DataFrame(columns=[
-            "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE","CÉDULA",
-            "FECHA DE LECTURA","TIPO DE DOSÍMETRO",
-            "Hp (10)","Hp (0.07)","Hp (3)",
-            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
-        ])
+        per_view["TIPO"] = "PERSONA"
 
-    # ----- CONTROL (una fila por CLIENTE) -----
-    control_v = df_vista[df_vista["NOMBRE"].apply(is_control_name)].copy()
-    if not control_v.empty:
-        for h in safe_cols(control_v, ["Hp (10)","Hp (0.07)","Hp (3)"]):
-            control_v[h] = control_v[h].apply(hp_to_num)
-
-        agr = agrupar_control_por if agrupar_control_por in control_v.columns else None
-        if agr is None:
-            control_v["__grupo__"] = "GLOBAL"
-            agr = "__grupo__"
-
-        ctrl_anual = control_v.groupby(agr, as_index=False).agg({
-            "CLIENTE":"last",
+    # Control → anual por CÓDIGO DE DOSÍMETRO
+    ctrl = df[is_control].copy()
+    ctrl_view = pd.DataFrame()
+    if not ctrl.empty:
+        ctrl["__fecha__"] = ctrl["PERIODO DE LECTURA"].map(periodo_to_date)
+        ctrl_anual = ctrl.groupby("CÓDIGO DE DOSÍMETRO", as_index=False).agg({
+            "CLIENTE":"last","CÓDIGO DE USUARIO":"last","CÉDULA":"last",
             "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
         }).rename(columns={"Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"})
-
-        tmp = control_v.copy()
-        tmp["__fecha__"] = tmp["PERIODO DE LECTURA"].map(periodo_to_date)
-        idx_last_c = tmp.groupby(agr)["__fecha__"].idxmax()
-        last_vals = tmp.loc[idx_last_c, safe_cols(tmp, [
-            agr,"PERIODO DE LECTURA","Hp (10)","Hp (0.07)","Hp (3)",
-            "CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO"
-        ])]
-
-        ctrl_view = ctrl_anual.merge(last_vals, on=agr, how="left")
+        idx_last_c = ctrl.groupby("CÓDIGO DE DOSÍMETRO")["__fecha__"].idxmax()
+        last_vals = ctrl.loc[idx_last_c, ["CÓDIGO DE DOSÍMETRO","Hp (10)","Hp (0.07)","Hp (3)"]]
+        ctrl_view = ctrl_anual.merge(last_vals, on="CÓDIGO DE DOSÍMETRO", how="left")
         ctrl_view["NOMBRE"] = "CONTROL"
-
-        def _fill_usercode(row):
-            cu = str(row.get("CÓDIGO DE USUARIO","") or "").strip()
-            return cu if cu else str(row.get("CÓDIGO DE DOSÍMETRO","") or "").strip()
-        ctrl_view["CÓDIGO DE USUARIO"] = ctrl_view.apply(_fill_usercode, axis=1)
-
-        for c in safe_cols(ctrl_view, ["Hp (10)","Hp (0.07)","Hp (3)","Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL"]):
-            ctrl_view[c] = ctrl_view[c].map(lambda v: pmfmt2(v, umbral_pm))
         ctrl_view["Hp (10) DE POR VIDA"]   = ctrl_view["Hp (10) ANUAL"]
         ctrl_view["Hp (0.07) DE POR VIDA"] = ctrl_view["Hp (0.07) ANUAL"]
         ctrl_view["Hp (3) DE POR VIDA"]    = ctrl_view["Hp (3) ANUAL"]
+        ctrl_view["TIPO"] = "CONTROL"
 
-        ctrl_final = ctrl_view[safe_cols(ctrl_view, [
-            "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE","CÉDULA",
-            "FECHA DE LECTURA","TIPO DE DOSÍMETRO",
-            "Hp (10)","Hp (0.07)","Hp (3)",
-            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
-        ])]
-    else:
-        ctrl_final = pd.DataFrame(columns=personas_final.columns)
+    reporte = pd.concat([ctrl_view, per_view], ignore_index=True, sort=False)
 
-    # Unión CONTROL primero
-    reporte = pd.concat([ctrl_final, personas_final], ignore_index=True)
-    if not reporte.empty:
-        reporte["__is_control__"] = reporte["NOMBRE"].apply(is_control_name)
-        reporte = reporte.sort_values(
-            by=["__is_control__","NOMBRE","CÉDULA","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO"],
-            ascending=[False, True, True, True, True]
-        ).drop(columns=["__is_control__"])
+    if reporte.empty:
+        return reporte
+
+    # Formateo a PM/2 decimales para todas las columnas de dosis
+    for c in ["Hp (10)","Hp (0.07)","Hp (3)",
+              "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+              "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
+        if c in reporte.columns:
+            reporte[c] = reporte[c].map(pmfmt)
+
+    # ---------- ORDEN: CONTROL primero + CÓDIGO DE DOSÍMETRO natural ----------
+    def is_control_name(x: str) -> bool:
+        s = strip_accents(str(x or "")).upper()
+        s = re.sub(r"\s+", " ", s).strip()
+        return s.startswith("CONTROL")
+
+    reporte["__is_control__"] = reporte["NOMBRE"].apply(is_control_name)
+    reporte["__dos_pref__"] = reporte["CÓDIGO DE DOSÍMETRO"].astype(str).str.extract(r'^([A-Za-z]+)', expand=False).fillna("")
+    reporte["__dos_num__"]  = pd.to_numeric(
+        reporte["CÓDIGO DE DOSÍMETRO"].astype(str).str.extract(r'(\d+)', expand=False),
+        errors="coerce"
+    ).fillna(0)
+
+    reporte = reporte.sort_values(
+        by=["__is_control__", "__dos_pref__", "__dos_num__"],
+        ascending=[False, True, True]
+    ).drop(columns=["__is_control__","__dos_pref__","__dos_num__"], errors="ignore")
+
+    # Orden final de columnas
+    cols_order = ["CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","CLIENTE","NOMBRE","CÉDULA",
+                  "Hp (10)","Hp (0.07)","Hp (3)",
+                  "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+                  "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]
+    cols_present = [c for c in cols_order if c in reporte.columns]
+    reporte = reporte[cols_present + [c for c in reporte.columns if c not in cols_present]]
+
     return reporte
 
 # ===================== UI: Tabs =====================
-tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
+tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (suma y vida)"])
 
 # ------------------ TAB 1 ------------------
 with tab1:
@@ -616,15 +545,18 @@ with tab1:
     upl_dosis = st.file_uploader("Selecciona CSV/XLS/XLSX (dosis)", type=["csv","xls","xlsx"], key="upl_dosis")
     df_dosis = leer_dosis(upl_dosis) if upl_dosis else None
     if df_dosis is not None and not df_dosis.empty:
-        st.success(f"Dosis cargadas: {len[df_dosis]} fila(s)") if False else None
+        st.success(f"Dosis cargadas: {len(df_dosis)} fila(s)")
         st.dataframe(df_dosis.head(15), use_container_width=True)
 
     per_options = sorted(df_lista["PERIODO DE LECTURA"].dropna().astype(str).str.upper().unique().tolist()) if df_lista is not None else []
     periodos_sel = st.multiselect("Filtrar por PERIODO DE LECTURA (elige uno o varios; vacío = TODOS)", per_options, default=[])
 
-    with st.expander("⚙️ Opcional: Control manual si NO existe CONTROL en el periodo"):
+    with st.expander("⚙️ Opcional: Control manual si NO existe CONTROL en el período"):
         use_manual_ctrl = st.checkbox("Activar control manual", value=False)
-        manual_ctrl_val = st.number_input("Valor de control manual a restar (Hp10, Hp0.07, Hp3)", min_value=0.0, step=0.001, format="%.3f", value=0.000)
+        manual_ctrl_val = st.number_input(
+            "Valor de control manual a restar (aplica a Hp (10), Hp (0.07) y Hp (3))",
+            min_value=0.0, step=0.001, format="%.3f", value=0.000
+        )
 
     subir_pm_como_texto = st.checkbox("Guardar 'PM' como texto en Ninox (si desmarcas, sube None en PM)", value=True)
 
@@ -653,7 +585,7 @@ with tab1:
                 st.session_state.df_final_num   = df_num_corr
                 st.success(f"¡Listo! Registros generados (corregidos): {len(st.session_state.df_final_vista)}")
                 st.dataframe(st.session_state.df_final_vista, use_container_width=True)
-                st.caption(f"Controles detectados: {(st.session_state.df_final_vista['NOMBRE'].apply(is_control_name)).sum()}")
+                st.caption(f"Controles detectados: {(st.session_state.df_final_vista['NOMBRE'].apply(_is_control_name_session)).sum()}")
 
     st.markdown("---")
     st.subheader("3) Subir TODO a Ninox (tabla **BASE DE DATOS**)")
@@ -679,9 +611,12 @@ with tab1:
         if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
             st.error("No hay datos procesados. Pulsa 'Procesar y Previsualizar' primero.")
         else:
-            df_para_subir = consolidar_para_upload(df_vista, df_num, umbral_pm=0.005)
+            # Consolidación para subir: CONTROL (promedio) + Personas (sumas por período/usuario)
+            # Usaremos df_vista (formateado) y df_num (numérico corregido)
+            # Para subir, bastará con df_vista tal cual por período.
+            df_para_subir = st.session_state.df_final_vista.copy()
             if df_para_subir.empty:
-                st.error("Nada para subir después de consolidar.")
+                st.error("Nada para subir.")
             else:
                 rows = []
                 for _, row in df_para_subir.iterrows():
@@ -699,8 +634,10 @@ with tab1:
                         "Hp (3)": _hp_value_for_upload(row.get("Hp (3)"), subir_pm_como_texto),
                     }
                     rows.append({"fields": fields})
+
                 with st.spinner("Subiendo a Ninox..."):
                     res = ninox_insert(TABLE_WRITE_NAME, rows, batch_size=300)
+
                 if res.get("ok"):
                     st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s).")
                     st.toast("¡Datos enviados a Ninox!", icon="✅")
@@ -709,70 +646,71 @@ with tab1:
 
 # ------------------ TAB 2 ------------------
 with tab2:
-    st.subheader("📊 Reporte Final (CONTROL primero y luego PERSONAS)")
+    st.subheader("📊 Reporte Final (CONTROL + Personas en UNA sola tabla)")
+
     fuente = st.radio("Fuente de datos para el reporte:", [
         "Usar datos procesados en esta sesión",
         "Leer directamente de Ninox (tabla BASE DE DATOS)",
     ], index=0)
 
-    cliente_filtro = None
+    cliente_filter = st.text_input("Filtrar por CLIENTE (opcional)", value="").strip()
+
+    df_base = pd.DataFrame()
+
     if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
         try:
             with st.spinner("Leyendo registros desde Ninox…"):
                 recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000)
                 df_nx = ninox_records_to_df(recs)
-
             if df_nx.empty:
                 st.warning("No se recibieron registros desde Ninox.")
             else:
-                # Guardamos en sesión para reusar el mismo pipeline (resta control + reporte)
-                st.session_state.df_final_vista = df_nx.copy()
-                # df_num: reconstruimos numérico con columnas "_Hp*_NUM" a partir de Hp(...),
-                # aquí asumimos que lo que está en Ninox ya es corregido; usamos directamente Hp(...)
-                tmp = df_nx.copy()
-                for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-                    tmp[h] = tmp[h].apply(hp_to_num)
-                tmp["_Hp10_NUM"]  = tmp["Hp (10)"]
-                tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]
-                tmp["_Hp3_NUM"]   = tmp["Hp (3)"]
-                st.session_state.df_final_num = tmp[[
-                    "_Hp10_NUM","_Hp007_NUM","_Hp3_NUM","PERIODO DE LECTURA","CLIENTE",
-                    "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
-                    "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
-                ]].copy()
-
+                if cliente_filter:
+                    df_nx = df_nx[df_nx["CLIENTE"].astype(str).str.contains(cliente_filter, case=False, na=False)]
+                df_base = df_nx.copy()
         except Exception as e:
             st.error(f"Error leyendo Ninox: {e}")
+    else:
+        df_vista = st.session_state.get("df_final_vista")
+        df_num   = st.session_state.get("df_final_num")
+        if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
+            st.info("No hay datos en memoria. Genera el cruce en la pestaña 1 para ver el reporte.")
+        else:
+            df_tmp = df_vista.copy()
+            # Convertimos PM→0.0 solo para armar anual/vida; conservamos columnas necesarias
+            for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
+                if h in df_tmp.columns:
+                    df_tmp[h] = df_tmp[h].apply(hp_to_num)
+            if cliente_filter:
+                df_tmp = df_tmp[df_tmp["CLIENTE"].astype(str).str.contains(cliente_filter, case=False, na=False)]
+            df_base = df_tmp.copy()
 
-    df_vista = st.session_state.get("df_final_vista")
-    df_num   = st.session_state.get("df_final_num")
-    if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
+    if df_base.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
-        # Filtro por Cliente
-        clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
-        if clientes:
-            cliente_sel = st.selectbox("Filtrar por CLIENTE (opcional)", ["(Todos)"] + clientes, index=0)
-            if cliente_sel != "(Todos)":
-                cliente_filtro = cliente_sel
-                df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
-                df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
+        # Construir tabla única ordenada (CONTROL primero y por código WB…)
+        reporte = construir_reporte_unico(df_base, "ninox" if fuente.startswith("Leer") else "session")
 
-        # Construimos la tabla única
-        reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
         if reporte.empty:
-            st.info("No hay datos para el reporte con el filtro aplicado.")
+            st.info("No hay datos para mostrar en el reporte final.")
         else:
             st.dataframe(reporte, use_container_width=True)
 
             # Descargas
             csv_bytes = reporte.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("⬇️ Descargar CSV", data=csv_bytes, file_name="Reporte_Final.csv", mime="text/csv")
+            st.download_button(
+                "⬇️ Descargar Reporte (CSV)",
+                data=csv_bytes,
+                file_name=f"Reporte_Final_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+            )
 
-            # Excel (sin xlsxwriter -> usamos openpyxl si está, o writer por defecto)
-            out_buf = io.BytesIO()
-            with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-                reporte.to_excel(writer, index=False, sheet_name="REPORTE")
-            st.download_button("⬇️ Descargar Excel", data=out_buf.getvalue(), file_name="Reporte_Final.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                reporte.to_excel(writer, sheet_name="Reporte", index=False)
+            st.download_button(
+                "⬇️ Descargar Reporte (Excel)",
+                data=buf.getvalue(),
+                file_name=f"Reporte_Final_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
