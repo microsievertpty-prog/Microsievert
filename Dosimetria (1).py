@@ -787,4 +787,3 @@ with tab2:
                 )
             else:
                 st.info("Para Excel instala `openpyxl` (recomendado) o `xlsxwriter`. Mientras tanto, usa el CSV.")
-
