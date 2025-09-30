@@ -329,3 +329,4 @@ def build_excel_like_example(
     bio = BytesIO()
     wb.save(bio)
     return bio.getvalue()
+
