@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import requests
 import streamlit as st
-from datetime import datetime, date
+from datetime import datetime
 
 # ===================== NINOX CONFIG =====================
 API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"
@@ -124,12 +124,24 @@ def ninox_list_tables(team_id: str, db_id: str):
     return r.json()
 
 def resolve_table_id(table_hint: str) -> str:
+    """Acepta nombre visible o ID de tabla Ninox; empareja de forma robusta."""
     hint = (table_hint or "").strip()
-    if hint and " " not in hint and len(hint) <= 8:
+    try:
+        tablas = ninox_list_tables(TEAM_ID, DATABASE_ID)
+    except Exception:
         return hint
-    for t in ninox_list_tables(TEAM_ID, DATABASE_ID):
-        if str(t.get("name", "")).strip().lower() == hint.lower():
-            return str(t.get("id", "")).strip()
+    # Id exacto o nombre exacto
+    for t in tablas:
+        if hint == str(t.get("id","")).strip():
+            return t["id"]
+        if hint.lower() == str(t.get("name","")).strip().lower():
+            return t["id"]
+    # Normalización sin acentos/espacios
+    def norm(s):
+        return strip_accents(str(s)).lower().replace(" ", "")
+    for t in tablas:
+        if norm(hint) == norm(t.get("name","")):
+            return t["id"]
     return hint
 
 def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 300) -> Dict[str, Any]:
@@ -166,24 +178,33 @@ def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
     return out
 
 def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
+    """Convierte la lista cruda de Ninox en DataFrame, tolerando variantes de nombres."""
     if not records:
         return pd.DataFrame()
+
+    def fget(d: Dict[str, Any], *keys):
+        for k in keys:
+            if k in d:
+                return d[k]
+        return None
+
     rows = []
     for rec in records:
         f = rec.get("fields", {}) or {}
         rows.append({
-            "PERIODO DE LECTURA": f.get("PERIODO DE LECTURA"),
-            "CLIENTE": f.get("CLIENTE"),
-            "CÓDIGO DE DOSÍMETRO": f.get("CÓDIGO DE DOSÍMETRO"),
-            "CÓDIGO DE USUARIO": f.get("CÓDIGO DE USUARIO"),
-            "NOMBRE": f.get("NOMBRE"),
-            "CÉDULA": f.get("CÉDULA"),
-            "FECHA DE LECTURA": f.get("FECHA DE LECTURA"),
-            "TIPO DE DOSÍMETRO": f.get("TIPO DE DOSÍMETRO"),
-            "Hp (10)": f.get("Hp (10)"),
-            "Hp (0.07)": f.get("Hp (0.07)"),
-            "Hp (3)": f.get("Hp (3)"),
+            "PERIODO DE LECTURA": fget(f, "PERIODO DE LECTURA", "PERIODO", "PERIODO_LECTURA"),
+            "CLIENTE": fget(f, "CLIENTE"),
+            "CÓDIGO DE DOSÍMETRO": fget(f, "CÓDIGO DE DOSÍMETRO", "CODIGO DE DOSIMETRO", "CODIGO_DOSIMETRO"),
+            "CÓDIGO DE USUARIO": fget(f, "CÓDIGO DE USUARIO", "CODIGO DE USUARIO", "CODIGO_USUARIO"),
+            "NOMBRE": fget(f, "NOMBRE"),
+            "CÉDULA": fget(f, "CÉDULA", "CEDULA"),
+            "FECHA DE LECTURA": fget(f, "FECHA DE LECTURA", "FECHA"),
+            "TIPO DE DOSÍMETRO": fget(f, "TIPO DE DOSÍMETRO", "TIPO DE DOSIMETRO"),
+            "Hp (10)": fget(f, "Hp (10)", "HP10", "HP_10"),
+            "Hp (0.07)": fget(f, "Hp (0.07)", "HP007", "HP_007"),
+            "Hp (3)": fget(f, "Hp (3)", "HP3", "HP_3"),
         })
+
     df = pd.DataFrame(rows)
     if "PERIODO DE LECTURA" in df.columns:
         df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
@@ -500,7 +521,7 @@ def construir_reporte_unico(
     df_vista: pd.DataFrame,
     df_num: pd.DataFrame,
     umbral_pm: float = 0.005,
-    agrupar_control_por: str = "CLIENTE",
+    agrupar_control_por: str = "CLIENTE",   # 1 fila de CONTROL por cliente
 ) -> pd.DataFrame:
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
@@ -588,59 +609,15 @@ def construir_reporte_unico(
     else:
         ctrl_final = pd.DataFrame(columns=personas_final.columns)
 
-    # Unión CONTROL primero + orden por CÓDIGO DE DOSÍMETRO
+    # Unión CONTROL primero
     reporte = pd.concat([ctrl_final, personas_final], ignore_index=True)
     if not reporte.empty:
         reporte["__is_control__"] = reporte["NOMBRE"].apply(is_control_name)
-        # Orden: CONTROL primero, luego por CÓDIGO DE DOSÍMETRO y CÓDIGO DE USUARIO
         reporte = reporte.sort_values(
-            by=["__is_control__","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE"],
-            ascending=[False, True, True, True]
+            by=["__is_control__","NOMBRE","CÉDULA","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO"],
+            ascending=[False, True, True, True, True]
         ).drop(columns=["__is_control__"])
     return reporte
-
-# ----------- Render de encabezado y bloque informativo -----------
-def render_encabezado_y_info(cliente: str, periodo_mostrar: str, fecha_emision: date, codigo_reporte: str):
-    col1, col2 = st.columns([2,1])
-    with col1:
-        st.markdown("**MICROSIEVERT, S.A.**  \nPH Conardo  \nCalle 41 Este, Panamá  \n**PANAMÁ**")
-    with col2:
-        st.markdown(
-            f"""
-| **Fecha de emisión** | **Cliente** | **Código** | **Página** |
-|---:|:---|:---:|:---:|
-| {fecha_emision.strftime('%d-%b-%y')} | {cliente or '-'} | {codigo_reporte or '-'} | 1 de 1 |
-            """,
-            unsafe_allow_html=True
-        )
-
-    st.markdown("---")
-    st.markdown("### **REPORTE DE DOSIMETRÍA**")
-    st.caption(
-        "Hp(10): Dosis efectiva; Hp(3): Dosis equivalente a cristalino; Hp(0.07): Dosis equivalente superficial."
-    )
-
-    with st.expander("ℹ️ **INFORMACIÓN DEL REPORTE DE DOSIMETRÍA**", expanded=False):
-        st.markdown(f"""
-- **Periodo de lectura:** {periodo_mostrar or '-'}  
-- **Fecha de lectura:** fecha en que se realizó la lectura del dosímetro.  
-- **Tipo de dosímetro:** CE = Cuerpo Entero; A = Anillo; B = Brazalete; CR = Cristalino.
-
-**DATOS DEL PARTICIPANTE**  
-• Código de usuario: Número único asignado al usuario por Microsievert, S.A.  
-• Nombre: Persona a la cual se le asigna el dosímetro personal.  
-• Cédula: Número del documento de identidad personal.  
-• Fecha de nacimiento: Registro de la fecha de nacimiento del usuario.
-
-**DOSIS EN MILISIEVERT (mSv)**  
-• **Dosis efectiva (Hp10):** tejido blando a 10 mm.  
-• **Dosis equivalente superficial (Hp0.07):** tejido blando a 0,07 mm.  
-• **Dosis equivalente a cristalino (Hp3):** tejido blando a 3 mm.
-
-**LECTURAS DE ANILLO:** registradas como Hp(0.07).  
-**DOSÍMETRO DE CONTROL:** incluido en cada paquete para monitorear exposición durante tránsito/almacenamiento.  
-**POR DEBAJO DEL MÍNIMO DETECTADO:** reportado como **"PM"**.  
-        """)
 
 # ===================== UI: Tabs =====================
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
@@ -746,29 +723,50 @@ with tab1:
                     res = ninox_insert(TABLE_WRITE_NAME, rows, batch_size=300)
                 if res.get("ok"):
                     st.success(f"✅ Subido a Ninox: {res.get('inserted', 0)} registro(s).")
+                    st.toast("¡Datos enviados a Ninox!", icon="✅")
                 else:
                     st.error(f"❌ Error al subir: {res.get('error')}")
 
 # ------------------ TAB 2 ------------------
 with tab2:
     st.subheader("📊 Reporte Final (CONTROL primero y luego PERSONAS)")
+
     fuente = st.radio("Fuente de datos para el reporte:", [
         "Usar datos procesados en esta sesión",
         "Leer directamente de Ninox (tabla BASE DE DATOS)",
     ], index=0)
 
-    # Encabezado: inputs del reporte
-    codigo_reporte = st.text_input("Código del reporte (opcional)", value="")
-    fecha_emision  = st.date_input("Fecha de emisión", value=date.today())
-
+    # Selector de tabla Ninox cuando se lee de Ninox
+    tabla_ninox = "BASE DE DATOS"
     if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
         try:
-            with st.spinner("Leyendo registros desde Ninox…"):
-                recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000)
-                df_nx = ninox_records_to_df(recs)
+            tablas = ninox_list_tables(TEAM_ID, DATABASE_ID)
+            opciones = [t.get("name","") for t in tablas]
+            if opciones:
+                tabla_ninox = st.selectbox(
+                    "Tabla de Ninox a leer",
+                    opciones,
+                    index=(opciones.index("BASE DE DATOS") if "BASE DE DATOS" in opciones else 0)
+                )
+        except Exception as e:
+            st.warning(f"No se pudieron listar tablas de Ninox: {e}")
+
+    cliente_filtro = None
+    if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
+        try:
+            with st.spinner(f"Leyendo registros desde Ninox (tabla: {tabla_ninox})…"):
+                recs = ninox_list_records(tabla_ninox, limit=1000)
+            st.caption(f"Registros crudos recibidos: {len(recs)}")
+            df_nx = ninox_records_to_df(recs)
+
             if df_nx.empty:
-                st.warning("No se recibieron registros desde Ninox.")
+                st.warning("No se recibieron registros útiles desde Ninox (después del mapeo de columnas).")
+                if recs:
+                    st.write("Ejemplo de payload recibido (primer registro):")
+                    st.json(recs[0])
             else:
+                st.success(f"Filas útiles para reporte: {len(df_nx)}")
+                # Guardamos en sesión para reusar el mismo pipeline (reporte único)
                 st.session_state.df_final_vista = df_nx.copy()
                 tmp = df_nx.copy()
                 for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
@@ -781,36 +779,25 @@ with tab2:
                     "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
                     "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
                 ]].copy()
+
         except Exception as e:
             st.error(f"Error leyendo Ninox: {e}")
 
     df_vista = st.session_state.get("df_final_vista")
     df_num   = st.session_state.get("df_final_num")
-
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
+        # Filtro por Cliente
         clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
-        cliente_sel = st.selectbox("Filtrar por CLIENTE (opcional)", ["(Todos)"] + clientes, index=0)
-        if cliente_sel != "(Todos)":
-            df_vista = df_vista[df_vista["CLIENTE"] == cliente_sel].copy()
-            df_num   = df_num[df_num["CLIENTE"] == cliente_sel].copy()
-            cliente_actual = cliente_sel
-        else:
-            cliente_actual = ""
+        if clientes:
+            cliente_sel = st.selectbox("Filtrar por CLIENTE (opcional)", ["(Todos)"] + clientes, index=0)
+            if cliente_sel != "(Todos)":
+                cliente_filtro = cliente_sel
+                df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
+                df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
 
-        # Periodo que mostramos arriba (si hay varios, toma el más reciente)
-        _tmp = df_vista.copy()
-        _tmp["__fecha__"] = _tmp["PERIODO DE LECTURA"].map(periodo_to_date)
-        if not _tmp["__fecha__"].isna().all():
-            periodo_mostrar = _tmp.loc[_tmp["__fecha__"].idxmax(), "PERIODO DE LECTURA"]
-        else:
-            periodo_mostrar = ""
-
-        # Encabezado + bloque informativo
-        render_encabezado_y_info(cliente_actual, periodo_mostrar, fecha_emision, codigo_reporte)
-
-        # Tabla única
+        # Construimos la tabla única
         reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
         if reporte.empty:
             st.info("No hay datos para el reporte con el filtro aplicado.")
@@ -821,6 +808,7 @@ with tab2:
             csv_bytes = reporte.to_csv(index=False).encode("utf-8-sig")
             st.download_button("⬇️ Descargar CSV", data=csv_bytes, file_name="Reporte_Final.csv", mime="text/csv")
 
+            # Excel (usando openpyxl, sin xlsxwriter)
             out_buf = io.BytesIO()
             with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
                 reporte.to_excel(writer, index=False, sheet_name="REPORTE")
