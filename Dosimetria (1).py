@@ -523,43 +523,45 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     for col, w in widths.items(): ws.column_dimensions[chr(64+col)].width = w
 
     row = 1
+        # Logo
     if logo_bytes:
-        img = XLImage(BytesIO(logo_bytes)); img.width=150; img.height=150
-        ws.add_image(img, "A1"); row = 7
-    else:
-        row = 3
+        try:
+            img = XLImage(BytesIO(logo_bytes))
+            img.width = 140
+            img.height = 140
+            ws.add_image(img, "A1")
+        except Exception:
+            pass
 
-    ws.cell(row,1,"MICROSIEVERT, S.A.").font=Font(bold=True); row+=1
-    ws.cell(row,1,"PH Conardo"); row+=1
-    ws.cell(row,1,"Calle 41 Este, Panamá"); row+=1
-    ws.cell(row,1,"PANAMÁ"); row+=2
-
-    ws.merge_cells(start_row=row-3, start_column=10, end_row=row-3, end_column=12)
-    ws.cell(row-3,10,"Fecha de emisión").alignment=Alignment(horizontal="center")
-    _box(ws,row-3,10,row-3,12,header=True,fill=GREY)
-    ws.merge_cells(start_row=row-2, start_column=10, end_row=row-2, end_column=12)
-    ws.cell(row-2,10,fecha_emision).alignment=Alignment(horizontal="center")
-    _box(ws,row-2,10,row-2,12,center=True)
-
-    ws.merge_cells(start_row=row-3, start_column=13, end_row=row-3, end_column=15)
-    ws.cell(row-3,13,"Cliente").alignment=Alignment(horizontal="center")
-    _box(ws,row-3,13,row-3,15,header=True,fill=GREY)
-    ws.merge_cells(start_row=row-2, start_column=13, end_row=row-2, end_column=15)
-    ws.cell(row-2,13,cliente).alignment=Alignment(horizontal="center")
-    _box(ws,row-2,13,row-2,15,center=True)
-
-    ws.merge_cells(start_row=row-1, start_column=13, end_row=row-1, end_column=15)
-    ws.cell(row-1,13,"Código").alignment=Alignment(horizontal="center")
-    _box(ws,row-1,13,row-1,15,header=True,fill=GREY)
-    ws.merge_cells(start_row=row, start_column=13, end_row=row, end_column=15)
-    ws.cell(row,13,codigo_reporte).alignment=Alignment(horizontal="center")
-    _box(ws,row,13,row,15,center=True)
+    # Datos empresa
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
+    ws.cell(row, 1, "MICROSIEVERT, S.A.").font = Font(bold=True, size=12)
+    row += 1
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7); ws.cell(row,1,"PH Conardo")
+    row += 1
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7); ws.cell(row,1,"Calle 41 Este, Panamá")
+    row += 1
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7); ws.cell(row,1,"PANAMÁ")
     row += 2
 
-    ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=10)
-    ws.cell(row,6,"REPORTE DE DOSIMETRÍA").font=Font(bold=True)
-    ws.cell(row,6).alignment=Alignment(horizontal="center")
+    # Fecha/Cliente/Código derecha
+    fecha_emision = fecha_emision or datetime.today().strftime("%d/%m/%Y")
+    ws.merge_cells(start_row=row, start_column=11, end_row=row, end_column=12); ws.cell(row,11,"Fecha de emisión").alignment = H_CENTER
+    ws.merge_cells(start_row=row, start_column=13, end_row=row, end_column=15); ws.cell(row,13, fecha_emision).alignment = H_CENTER
+    row += 1
+    ws.merge_cells(start_row=row, start_column=11, end_row=row, end_column=12); ws.cell(row,11,"Cliente").alignment = H_CENTER
+    ws.merge_cells(start_row=row, start_column=13, end_row=row, end_column=15); ws.cell(row,13, (cliente or "")).alignment = H_CENTER
+    row += 1
+    ws.merge_cells(start_row=row, start_column=11, end_row=row, end_column=12); ws.cell(row,11,"Código").alignment = H_CENTER
+    ws.merge_cells(start_row=row, start_column=13, end_row=row, end_column=15); ws.cell(row,13, (codigo_reporte or "SIN-CÓDIGO")).alignment = H_CENTER
     row += 2
+
+    # Título
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
+    t = ws.cell(row, 1, "REPORTE DE DOSIMETRÍA")
+    t.font = Font(bold=True, size=14)
+    t.alignment = H_CENTER
+    row += 1
 
     # Cabecera agrupada
     cab1 = [("PERIODO DE LECTURA",1,1),("CÓDIGO DE USUARIO",2,2),("NOMBRE",3,3),("CÉDULA",4,4),
@@ -868,3 +870,5 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
