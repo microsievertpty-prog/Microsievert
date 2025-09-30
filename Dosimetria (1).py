@@ -868,3 +868,4 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
