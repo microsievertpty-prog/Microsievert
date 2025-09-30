@@ -714,3 +714,4 @@ with tab2:
                 file_name=f"Reporte_Final_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+
