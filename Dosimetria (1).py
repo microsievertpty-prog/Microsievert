@@ -588,26 +588,14 @@ def construir_reporte_unico(
     else:
         ctrl_final = pd.DataFrame(columns=personas_final.columns)
 
-    # Unión CONTROL primero + ORDEN por CÓDIGO DE DOSÍMETRO (alfanumérico con parte numérica)
+    # Unión CONTROL primero
     reporte = pd.concat([ctrl_final, personas_final], ignore_index=True)
     if not reporte.empty:
         reporte["__is_control__"] = reporte["NOMBRE"].apply(is_control_name)
-
-        # Extraemos prefijo (letras) y número del CÓDIGO DE DOSÍMETRO: p.ej. WB000081 -> prefijo=WB, num=81
-        if "CÓDIGO DE DOSÍMETRO" in reporte.columns:
-            cod_series = reporte["CÓDIGO DE DOSÍMETRO"].astype(str).str.strip().str.upper()
-            extra = cod_series.str.extract(r'^(?P<__pref>[A-Z]+)?(?P<__num>\d+)?')
-            reporte["__pref"] = extra["__pref"].fillna("")
-            reporte["__num"]  = pd.to_numeric(extra["__num"], errors="coerce").fillna(-1).astype(int)
-        else:
-            reporte["__pref"] = ""
-            reporte["__num"]  = -1
-
         reporte = reporte.sort_values(
-            by=["__is_control__", "__pref", "__num", "NOMBRE", "CÉDULA", "CÓDIGO DE USUARIO", "CÓDIGO DE DOSÍMETRO"],
-            ascending=[False,            True,     True,   True,     True,            True,                 True],
-            na_position="last"
-        ).drop(columns=["__is_control__", "__pref", "__num"])
+            by=["__is_control__","NOMBRE","CÉDULA","CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO"],
+            ascending=[False, True, True, True, True]
+        ).drop(columns=["__is_control__"])
     return reporte
 
 # ===================== UI: Tabs =====================
@@ -786,3 +774,4 @@ with tab2:
             with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
                 reporte.to_excel(writer, index=False, sheet_name="REPORTE")
             st.download_button("⬇️ Descargar Excel", data=out_buf.getvalue(), file_name="Reporte_Final.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
