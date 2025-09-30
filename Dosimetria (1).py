@@ -10,31 +10,27 @@ import requests
 import streamlit as st
 from datetime import datetime
 
-# ===================== NINOX CONFIG =====================
+# ======= CONFIG NINOX =======
 API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"
 TEAM_ID     = "YrsYfTegptdZcHJEj"
 DATABASE_ID = "ow1geqnkz00e"
 BASE_URL    = "https://api.ninox.com/v1"
 TABLE_WRITE_NAME = "BASE DE DATOS"
 
-# ===================== UI =====================
+# ======= UI =======
 st.set_page_config(page_title="Microsievert — Dosimetría", page_icon="🧪", layout="wide")
 st.title("🧪 Carga y Cruce de Dosis → Ninox (**BASE DE DATOS**)")
 
-# ===================== Helpers =====================
+# ======= Helpers =======
 def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 def hp_to_num(x) -> float:
-    if x is None:
-        return 0.0
+    if x is None: return 0.0
     s = str(x).strip().upper()
-    if s in ("", "PM", "NONE", "NAN"):
-        return 0.0
-    try:
-        return float(s)
-    except Exception:
-        return 0.0
+    if s in ("", "PM", "NONE", "NAN"): return 0.0
+    try: return float(s)
+    except Exception: return 0.0
 
 def pmfmt2(v, thr: float = 0.005) -> str:
     try:
@@ -46,8 +42,7 @@ def pmfmt2(v, thr: float = 0.005) -> str:
 
 def last_nonempty(series: pd.Series) -> str:
     for v in series.iloc[::-1]:
-        if str(v).strip():
-            return str(v)
+        if str(v).strip(): return str(v)
     return ""
 
 def is_control_name(x: str) -> bool:
@@ -72,84 +67,55 @@ def _to_year4(y: str) -> str:
     return f"20{y}" if len(y) == 2 else y
 
 def normalizar_periodo(valor: str) -> str:
-    if not valor:
-        return ""
+    if not valor: return ""
     s = strip_accents(str(valor)).upper().strip()
     s = re.sub(r"\s+", " ", s)
-
     m = re.match(r"^(JAN|ENE|FEB|MAR|APR|ABR|MAY|JUN|JUL|AUG|AGO|SEP|OCT|NOV|DEC|DIC)[\s\-/]*([0-9]{2,4})$", s)
     if m:
         mes = MES_MAP.get(m.group(1), m.group(1))
         anio = _to_year4(m.group(2))
         return f"{mes} {anio}"
-
     m = re.match(r"^([0-1][0-9])[\s\-/]*([0-9]{2,4})$", s)
     if m and m.group(1) in MES_NUM:
-        mes = MES_NUM[m.group(1)]
-        anio = _to_year4(m.group(2))
-        return f"{mes} {anio}"
-
+        mes = MES_NUM[m.group(1)]; anio = _to_year4(m.group(2)); return f"{mes} {anio}"
     m = re.match(r"^([0-9]{4})[\s\-/]*([0-1][0-9])$", s)
     if m and m.group(2) in MES_NUM:
-        mes = MES_NUM[m.group(2)]
-        anio = m.group(1)
-        return f"{mes} {anio}"
-
+        mes = MES_NUM[m.group(2)]; anio = m.group(1); return f"{mes} {anio}"
     return s
 
 MES_A_NUM = {"ENERO":1,"FEBRERO":2,"MARZO":3,"ABRIL":4,"MAYO":5,"JUNIO":6,"JULIO":7,"AGOSTO":8,"SEPTIEMBRE":9,"OCTUBRE":10,"NOVIEMBRE":11,"DICIEMBRE":12}
 def periodo_to_date(s: str):
-    if not s or not isinstance(s, str):
-        return pd.NaT
+    if not s or not isinstance(s, str): return pd.NaT
     s = s.strip().upper()
     m = re.match(r"^(ENERO|FEBRERO|MARZO|ABRIL|MAYO|JUNIO|JULIO|AGOSTO|SEPTIEMBRE|OCTUBRE|NOVIEMBRE|DICIEMBRE)\s+([0-9]{4})$", s)
-    if not m:
-        return pd.NaT
-    mes = MES_A_NUM.get(m.group(1))
-    an = int(m.group(2))
-    try:
-        return pd.Timestamp(year=an, month=mes, day=1)
-    except Exception:
-        return pd.NaT
+    if not m: return pd.NaT
+    mes = MES_A_NUM.get(m.group(1)); an = int(m.group(2))
+    try: return pd.Timestamp(year=an, month=mes, day=1)
+    except Exception: return pd.NaT
 
-# ===================== Ninox helpers =====================
+# ======= Ninox API =======
 def ninox_headers():
     return {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
 @st.cache_data(ttl=300, show_spinner=False)
 def ninox_list_tables(team_id: str, db_id: str):
     url = f"{BASE_URL}/teams/{team_id}/databases/{db_id}/tables"
-    r = requests.get(url, headers=ninox_headers(), timeout=30)
-    r.raise_for_status()
+    r = requests.get(url, headers=ninox_headers(), timeout=30); r.raise_for_status()
     return r.json()
 
 def resolve_table_id(table_hint: str) -> str:
-    """Acepta nombre visible o ID de tabla Ninox; empareja de forma robusta."""
     hint = (table_hint or "").strip()
-    try:
-        tablas = ninox_list_tables(TEAM_ID, DATABASE_ID)
-    except Exception:
-        return hint
-    # Id exacto o nombre exacto
-    for t in tablas:
-        if hint == str(t.get("id","")).strip():
-            return t["id"]
-        if hint.lower() == str(t.get("name","")).strip().lower():
-            return t["id"]
-    # Normalización sin acentos/espacios
-    def norm(s):
-        return strip_accents(str(s)).lower().replace(" ", "")
-    for t in tablas:
-        if norm(hint) == norm(t.get("name","")):
-            return t["id"]
+    if hint and " " not in hint and len(hint) <= 8: return hint
+    for t in ninox_list_tables(TEAM_ID, DATABASE_ID):
+        if str(t.get("name","")).strip().lower() == hint.lower():
+            return str(t.get("id","")).strip()
     return hint
 
 def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 300) -> Dict[str, Any]:
     table_id = resolve_table_id(table_hint)
     url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
     n, inserted = len(rows), 0
-    if n == 0:
-        return {"ok": True, "inserted": 0}
+    if n == 0: return {"ok": True, "inserted": 0}
     for i in range(0, n, batch_size):
         chunk = rows[i:i+batch_size]
         r = requests.post(url, headers=ninox_headers(), json=chunk, timeout=60)
@@ -162,63 +128,47 @@ def ninox_insert(table_hint: str, rows: List[Dict[str, Any]], batch_size: int = 
 def ninox_list_records(table_hint: str, limit: int = 1000, max_pages: int = 50):
     table_id = resolve_table_id(table_hint)
     url = f"{BASE_URL}/teams/{TEAM_ID}/databases/{DATABASE_ID}/tables/{table_id}/records"
-    out: List[Dict[str, Any]] = []
-    skip = 0
+    out = []; skip = 0
     for _ in range(max_pages):
         params = {"limit": limit, "skip": skip}
-        r = requests.get(url, headers=ninox_headers(), params=params, timeout=60)
-        r.raise_for_status()
+        r = requests.get(url, headers=ninox_headers(), params=params, timeout=60); r.raise_for_status()
         batch = r.json() or []
-        if not batch:
-            break
+        if not batch: break
         out.extend(batch)
-        if len(batch) < limit:
-            break
+        if len(batch) < limit: break
         skip += limit
     return out
 
 def ninox_records_to_df(records: List[Dict[str,Any]]) -> pd.DataFrame:
-    """Convierte la lista cruda de Ninox en DataFrame, tolerando variantes de nombres."""
-    if not records:
-        return pd.DataFrame()
-
-    def fget(d: Dict[str, Any], *keys):
-        for k in keys:
-            if k in d:
-                return d[k]
-        return None
-
+    if not records: return pd.DataFrame()
     rows = []
     for rec in records:
         f = rec.get("fields", {}) or {}
         rows.append({
-            "PERIODO DE LECTURA": fget(f, "PERIODO DE LECTURA", "PERIODO", "PERIODO_LECTURA"),
-            "CLIENTE": fget(f, "CLIENTE"),
-            "CÓDIGO DE DOSÍMETRO": fget(f, "CÓDIGO DE DOSÍMETRO", "CODIGO DE DOSIMETRO", "CODIGO_DOSIMETRO"),
-            "CÓDIGO DE USUARIO": fget(f, "CÓDIGO DE USUARIO", "CODIGO DE USUARIO", "CODIGO_USUARIO"),
-            "NOMBRE": fget(f, "NOMBRE"),
-            "CÉDULA": fget(f, "CÉDULA", "CEDULA"),
-            "FECHA DE LECTURA": fget(f, "FECHA DE LECTURA", "FECHA"),
-            "TIPO DE DOSÍMETRO": fget(f, "TIPO DE DOSÍMETRO", "TIPO DE DOSIMETRO"),
-            "Hp (10)": fget(f, "Hp (10)", "HP10", "HP_10"),
-            "Hp (0.07)": fget(f, "Hp (0.07)", "HP007", "HP_007"),
-            "Hp (3)": fget(f, "Hp (3)", "HP3", "HP_3"),
+            "PERIODO DE LECTURA": f.get("PERIODO DE LECTURA"),
+            "CLIENTE": f.get("CLIENTE"),
+            "CÓDIGO DE DOSÍMETRO": f.get("CÓDIGO DE DOSÍMETRO"),
+            "CÓDIGO DE USUARIO": f.get("CÓDIGO DE USUARIO"),
+            "NOMBRE": f.get("NOMBRE"),
+            "CÉDULA": f.get("CÉDULA"),
+            "FECHA DE LECTURA": f.get("FECHA DE LECTURA"),
+            "TIPO DE DOSÍMETRO": f.get("TIPO DE DOSÍMETRO"),
+            "Hp (10)": f.get("Hp (10)"),
+            "Hp (0.07)": f.get("Hp (0.07)"),
+            "Hp (3)": f.get("Hp (3)"),
         })
-
     df = pd.DataFrame(rows)
     if "PERIODO DE LECTURA" in df.columns:
         df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
     return df
 
-# ===================== Lectores de archivos =====================
+# ======= Lectores =======
 def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     def _n(x: str) -> str:
         x = strip_accents(str(x)).strip()
         x = re.sub(r"\s+", " ", x)
         return x
-    out = df.copy()
-    out.columns = [_n(c) for c in out.columns]
-    return out
+    out = df.copy(); out.columns = [_n(c) for c in out.columns]; return out
 
 def coalesce_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     got = [c for c in df.columns if c in candidates]
@@ -228,14 +178,10 @@ def parse_csv_robust(upload) -> pd.DataFrame:
     raw = upload.read(); upload.seek(0)
     for sep in [";", ",", None]:
         for enc in ["utf-8-sig", "latin-1"]:
-            try:
-                return pd.read_csv(BytesIO(raw), sep=sep, engine="python", encoding=enc)
-            except Exception:
-                continue
-    try:
-        return pd.read_excel(BytesIO(raw))
-    except Exception:
-        raise
+            try: return pd.read_csv(BytesIO(raw), sep=sep, engine="python", encoding=enc)
+            except Exception: continue
+    try: return pd.read_excel(BytesIO(raw))
+    except Exception: raise
 
 def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
     if not upload: return None
@@ -245,10 +191,8 @@ def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
         sheet = None
         for s in xls.sheet_names:
             s_norm = strip_accents(s).lower()
-            if "asignar" in s_norm and "dosimet" in s_norm:
-                sheet = s; break
-        if sheet is None:
-            sheet = xls.sheet_names[0]
+            if "asignar" in s_norm and "dosimet" in s_norm: sheet = s; break
+        if sheet is None: sheet = xls.sheet_names[0]
         df = pd.read_excel(xls, sheet_name=sheet)
     else:
         df = parse_csv_robust(upload)
@@ -288,10 +232,8 @@ def leer_lista_codigo(upload) -> Optional[pd.DataFrame]:
 def leer_dosis(upload) -> Optional[pd.DataFrame]:
     if not upload: return None
     name = upload.name.lower()
-    if name.endswith((".xlsx",".xls")):
-        df = pd.read_excel(upload)
-    else:
-        df = parse_csv_robust(upload)
+    if name.endswith((".xlsx",".xls")): df = pd.read_excel(upload)
+    else: df = parse_csv_robust(upload)
 
     cols = (df.columns.astype(str).str.strip().str.lower()
             .str.replace(" ", "", regex=False)
@@ -301,8 +243,7 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
 
     if "dosimeter" not in df.columns:
         for alt in ["dosimetro","codigo","codigodosimetro","codigo_dosimetro"]:
-            if alt in df.columns:
-                df.rename(columns={alt:"dosimeter"}, inplace=True); break
+            if alt in df.columns: df.rename(columns={alt:"dosimeter"}, inplace=True); break
 
     for cands, dest in [ (["hp10dosecorr","hp10dose","hp10"], "hp10dose"),
                          (["hp007dosecorr","hp007dose","hp007"], "hp0.07dose"),
@@ -318,7 +259,7 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     return df
 
-# ===================== Construcción de registros =====================
+# ======= Construcción de registros =======
 def construir_registros(df_lista: pd.DataFrame,
                         df_dosis: pd.DataFrame,
                         periodos: List[str]) -> pd.DataFrame:
@@ -327,33 +268,25 @@ def construir_registros(df_lista: pd.DataFrame,
     df_l["CÓDIGO_DOSÍMETRO"]   = df_l["CÓDIGO_DOSÍMETRO"].astype(str).str.strip().str.upper()
 
     selected = [p.strip().upper() for p in periodos if str(p).strip()]
-    if selected:
-        df_l = df_l[df_l["PERIODO DE LECTURA"].isin(selected)]
+    if selected: df_l = df_l[df_l["PERIODO DE LECTURA"].isin(selected)]
 
     idx = df_dosis.set_index("dosimeter") if "dosimeter" in df_dosis.columns else pd.DataFrame().set_index(pd.Index([]))
 
-    registros: List[Dict[str, Any]] = []
+    registros = []
     df_l = pd.concat([df_l[df_l["_IS_CONTROL"]], df_l[~df_l["_IS_CONTROL"]]], ignore_index=True)
 
     for _, r in df_l.iterrows():
         cod = str(r["CÓDIGO_DOSÍMETRO"]).strip().upper()
-        if not cod or cod == "NAN":
-            continue
-        if cod not in idx.index:
-            continue
+        if not cod or cod == "NAN": continue
+        if cod not in idx.index: continue
         d = idx.loc[cod]
-        if isinstance(d, pd.DataFrame):
-            d = d.sort_values(by="timestamp").iloc[-1]
+        if isinstance(d, pd.DataFrame): d = d.sort_values(by="timestamp").iloc[-1]
         ts = d.get("timestamp", pd.NaT)
-        fecha_str = ""
-        try:
-            fecha_str = pd.to_datetime(ts).strftime("%d/%m/%Y %H:%M") if pd.notna(ts) else ""
-        except Exception:
-            fecha_str = ""
+        try: fecha_str = pd.to_datetime(ts).strftime("%d/%m/%Y %H:%M") if pd.notna(ts) else ""
+        except Exception: fecha_str = ""
 
         nombre = str(r.get("NOMBRE","")).strip()
-        if bool(r["_IS_CONTROL"]) and (not nombre):
-            nombre = "CONTROL"
+        if bool(r["_IS_CONTROL"]) and (not nombre): nombre = "CONTROL"
 
         registros.append({
             "PERIODO DE LECTURA": r["PERIODO DE LECTURA"],
@@ -375,19 +308,17 @@ def construir_registros(df_lista: pd.DataFrame,
         df_final = df_final.sort_values(["_IS_CONTROL","NOMBRE","CÉDULA"], ascending=[False, True, True]).reset_index(drop=True)
     return df_final
 
-# ===================== Resta de CONTROL + Formato =====================
+# ======= Resta CONTROL + vista/num =======
 def aplicar_resta_control_y_formato(
     df_final: pd.DataFrame,
     umbral_pm: float = 0.005,
     manual_ctrl: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    if df_final is None or df_final.empty:
-        return df_final, df_final
+    if df_final is None or df_final.empty: return df_final, df_final
 
     df = df_final.copy()
     for h in ["Hp (10)", "Hp (0.07)", "Hp (3)"]:
-        if h not in df.columns:
-            df[h] = 0.0
+        if h not in df.columns: df[h] = 0.0
         df[h] = pd.to_numeric(df[h], errors="coerce").fillna(0.0)
     if "PERIODO DE LECTURA" in df.columns:
         df["PERIODO DE LECTURA"] = df["PERIODO DE LECTURA"].astype(str).map(normalizar_periodo)
@@ -430,8 +361,7 @@ def aplicar_resta_control_y_formato(
     df_ctrl_view = pd.DataFrame()
     if not df_ctrl.empty:
         df_ctrl_view = df_ctrl.merge(ctrl_means, on="PERIODO DE LECTURA", how="left")
-        for c in ["Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"]:
-            df_ctrl_view[c] = df_ctrl_view[c].fillna(0.0)
+        for c in ["Hp10_CTRL","Hp007_CTRL","Hp3_CTRL"]: df_ctrl_view[c] = df_ctrl_view[c].fillna(0.0)
         df_ctrl_view["_Hp10_NUM"]  = (df_ctrl_view["Hp (10)"]   - df_ctrl_view["Hp10_CTRL"]).clip(lower=0.0)
         df_ctrl_view["_Hp007_NUM"] = (df_ctrl_view["Hp (0.07)"] - df_ctrl_view["Hp007_CTRL"]).clip(lower=0.0)
         df_ctrl_view["_Hp3_NUM"]   = (df_ctrl_view["Hp (3)"]    - df_ctrl_view["Hp3_CTRL"]).clip(lower=0.0)
@@ -450,12 +380,11 @@ def aplicar_resta_control_y_formato(
 
     return df_vista, df_num
 
-# ===================== Consolidación para subir =====================
+# ======= Consolidar para subir =======
 def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
-    if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
-        return pd.DataFrame()
+    if df_vista is None or df_vista.empty or df_num is None or df_num.empty: return pd.DataFrame()
 
-    # PERSONAS
+    # Personas
     personas_num = df_num[~df_num["NOMBRE"].apply(is_control_name)].copy()
     per_consol = pd.DataFrame()
     if not personas_num.empty:
@@ -465,20 +394,16 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
             "_Hp10_NUM":"sum","_Hp007_NUM":"sum","_Hp3_NUM":"sum"
         }).rename(columns={"_Hp10_NUM":"Hp (10)","_Hp007_NUM":"Hp (0.07)","_Hp3_NUM":"Hp (3)"})
 
-    # CONTROL
+    # Control (promedio por periodo)
     control_v = df_vista[df_vista["NOMBRE"].apply(is_control_name)].copy()
     ctrl_consol = pd.DataFrame()
     if not control_v.empty:
-        for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-            control_v[h] = control_v[h].apply(hp_to_num)
-
+        for h in ["Hp (10)","Hp (0.07)","Hp (3)"]: control_v[h] = control_v[h].apply(hp_to_num)
         def _last_nonempty(series: pd.Series) -> str:
             for v in series.iloc[::-1]:
                 s = str(v).strip()
-                if s:
-                    return s
+                if s: return s
             return ""
-
         ctrl_consol = control_v.groupby(["PERIODO DE LECTURA"], as_index=False).agg({
             "CLIENTE":"last",
             "CÓDIGO DE DOSÍMETRO":"first",
@@ -488,20 +413,16 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
             "FECHA DE LECTURA":"last",
             "Hp (10)":"mean","Hp (0.07)":"mean","Hp (3)":"mean"
         })
-
         def _fill_usercode(row):
             cu = str(row.get("CÓDIGO DE USUARIO","") or "").strip()
-            if cu:
-                return cu
+            if cu: return cu
             cd = str(row.get("CÓDIGO DE DOSÍMETRO","") or "").strip()
             return cd if cd else "CONTROL"
-
         ctrl_consol["CÓDIGO DE USUARIO"] = ctrl_consol.apply(_fill_usercode, axis=1)
         ctrl_consol["NOMBRE"] = "CONTROL"
 
     out = pd.concat([ctrl_consol, per_consol], ignore_index=True, sort=False)
-    if out.empty:
-        return out
+    if out.empty: return out
 
     for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
         out[h] = out[h].map(lambda v: pmfmt2(v, umbral_pm))
@@ -516,17 +437,16 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
     out = out.sort_values(sort_keys).reset_index(drop=True)
     return out
 
-# ===================== REPORTE ÚNICO (CONTROL primero) =====================
+# ======= Reporte único (CONTROL primero) =======
 def construir_reporte_unico(
     df_vista: pd.DataFrame,
     df_num: pd.DataFrame,
     umbral_pm: float = 0.005,
-    agrupar_control_por: str = "CLIENTE",   # 1 fila de CONTROL por cliente
+    agrupar_control_por: str = "CLIENTE",
 ) -> pd.DataFrame:
-    if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
-        return pd.DataFrame()
+    if df_vista is None or df_vista.empty or df_num is None or df_num.empty: return pd.DataFrame()
 
-    # ----- PERSONAS -----
+    # Personas (agrega anual/vida y último periodo)
     personas_num = df_num[~df_num["NOMBRE"].apply(is_control_name)].copy()
     if not personas_num.empty:
         per_anual = personas_num.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
@@ -561,44 +481,34 @@ def construir_reporte_unico(
             "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
         ])
 
-    # ----- CONTROL (una fila por CLIENTE) -----
+    # Control → 1 fila por CLIENTE (suma anual + último periodo)
     control_v = df_vista[df_vista["NOMBRE"].apply(is_control_name)].copy()
     if not control_v.empty:
         for h in safe_cols(control_v, ["Hp (10)","Hp (0.07)","Hp (3)"]):
             control_v[h] = control_v[h].apply(hp_to_num)
-
         agr = agrupar_control_por if agrupar_control_por in control_v.columns else None
         if agr is None:
-            control_v["__grupo__"] = "GLOBAL"
-            agr = "__grupo__"
-
+            control_v["__grupo__"] = "GLOBAL"; agr = "__grupo__"
         ctrl_anual = control_v.groupby(agr, as_index=False).agg({
-            "CLIENTE":"last",
-            "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
+            "CLIENTE":"last", "Hp (10)":"sum","Hp (0.07)":"sum","Hp (3)":"sum"
         }).rename(columns={"Hp (10)":"Hp (10) ANUAL","Hp (0.07)":"Hp (0.07) ANUAL","Hp (3)":"Hp (3) ANUAL"})
-
-        tmp = control_v.copy()
-        tmp["__fecha__"] = tmp["PERIODO DE LECTURA"].map(periodo_to_date)
+        tmp = control_v.copy(); tmp["__fecha__"] = tmp["PERIODO DE LECTURA"].map(periodo_to_date)
         idx_last_c = tmp.groupby(agr)["__fecha__"].idxmax()
         last_vals = tmp.loc[idx_last_c, safe_cols(tmp, [
             agr,"PERIODO DE LECTURA","Hp (10)","Hp (0.07)","Hp (3)",
             "CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO"
         ])]
-
         ctrl_view = ctrl_anual.merge(last_vals, on=agr, how="left")
         ctrl_view["NOMBRE"] = "CONTROL"
-
         def _fill_usercode(row):
             cu = str(row.get("CÓDIGO DE USUARIO","") or "").strip()
             return cu if cu else str(row.get("CÓDIGO DE DOSÍMETRO","") or "").strip()
         ctrl_view["CÓDIGO DE USUARIO"] = ctrl_view.apply(_fill_usercode, axis=1)
-
         for c in safe_cols(ctrl_view, ["Hp (10)","Hp (0.07)","Hp (3)","Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL"]):
             ctrl_view[c] = ctrl_view[c].map(lambda v: pmfmt2(v, umbral_pm))
         ctrl_view["Hp (10) DE POR VIDA"]   = ctrl_view["Hp (10) ANUAL"]
         ctrl_view["Hp (0.07) DE POR VIDA"] = ctrl_view["Hp (0.07) ANUAL"]
         ctrl_view["Hp (3) DE POR VIDA"]    = ctrl_view["Hp (3) ANUAL"]
-
         ctrl_final = ctrl_view[safe_cols(ctrl_view, [
             "PERIODO DE LECTURA","CLIENTE","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE","CÉDULA",
             "FECHA DE LECTURA","TIPO DE DOSÍMETRO",
@@ -609,7 +519,6 @@ def construir_reporte_unico(
     else:
         ctrl_final = pd.DataFrame(columns=personas_final.columns)
 
-    # Unión CONTROL primero
     reporte = pd.concat([ctrl_final, personas_final], ignore_index=True)
     if not reporte.empty:
         reporte["__is_control__"] = reporte["NOMBRE"].apply(is_control_name)
@@ -618,6 +527,188 @@ def construir_reporte_unico(
             ascending=[False, True, True, True, True]
         ).drop(columns=["__is_control__"])
     return reporte
+
+# ======= Constructor Excel formateado =======
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.utils import get_column_letter
+
+def _b():
+    s = Side(style="thin", color="000000")
+    return Border(left=s, right=s, top=s, bottom=s)
+
+def _title(ws, cell, txt, size=12, bold=True, center=True):
+    ws[cell].value = txt
+    ws[cell].font = Font(size=size, bold=bold)
+    ws[cell].alignment = Alignment(horizontal="center" if center else "left", vertical="center")
+
+def _label(ws, cell, txt, bold=True):
+    ws[cell].value = txt
+    ws[cell].font = Font(bold=bold)
+    ws[cell].alignment = Alignment(horizontal="left", vertical="center")
+
+def _cell(ws, r, c, val, bold=False, center=False, fill=None, border=True):
+    cell = ws.cell(r, c, val)
+    cell.font = Font(bold=bold)
+    cell.alignment = Alignment(horizontal="center" if center else "left", vertical="center", wrap_text=True)
+    if fill: cell.fill = PatternFill("solid", fgColor=fill)
+    if border: cell.border = _b()
+
+def _set_col_widths(ws, widths):
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+def _fmt_hp(v): return v
+
+def build_excel_like_example(
+    df_reporte: pd.DataFrame,
+    fecha_emision: str,
+    cliente: str,
+    codigo_reporte: str,
+    empresa_info: Dict[str, str] = None,
+) -> bytes:
+    if empresa_info is None:
+        empresa_info = {
+            "empresa": "MICROSIEVERT, S.A.",
+            "direccion1": "PH Conardo",
+            "direccion2": "Calle 41 Este, Panamá",
+            "pais": "PANAMÁ",
+        }
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "REPORTE"
+
+    _set_col_widths(ws, [14, 13, 22, 16, 16, 16, 16, 13, 16, 16, 14, 14, 14, 14])
+
+    ws.merge_cells("A1:G1");  _label(ws, "A1", empresa_info.get("empresa",""))
+    ws.merge_cells("A2:G2");  _label(ws, "A2", empresa_info.get("direccion1",""), bold=False)
+    ws.merge_cells("A3:G3");  _label(ws, "A3", empresa_info.get("direccion2",""), bold=False)
+    ws.merge_cells("A4:G4");  _label(ws, "A4", empresa_info.get("pais",""), bold=True)
+
+    ws.merge_cells("H1:N1"); _title(ws, "H1", "Fecha de emisión", size=11)
+    ws.merge_cells("H2:N2"); _cell(ws, 2, 8, fecha_emision, center=True)
+    ws.merge_cells("H3:K3"); _title(ws, "H3", "Cliente", size=11)
+    ws.merge_cells("L3:N3"); _cell(ws, 3, 12, cliente, center=True)
+    ws.merge_cells("H4:K4"); _title(ws, "H4", "Código", size=11)
+    ws.merge_cells("L4:N4"); _cell(ws, 4, 12, codigo_reporte, center=True)
+
+    ws.merge_cells("A6:N6"); _title(ws, "A6", "REPORTE DE DOSIMETRÍA", size=13)
+
+    start_row = 8
+    headers_lvl1 = [
+        ("PERIODO DE LECTURA", 1),
+        ("CÓDIGO DE USUARIO", 1),
+        ("NOMBRE", 1),
+        ("CÉDULA", 1),
+        ("FECHA Y HORA DE LECTURA", 1),
+        ("TIPO DE DOSÍMETRO", 1),
+        ("DOSIS EN MILISIEVERT (mSv) — DOSIS ACTUAL", 3),
+        ("DOSIS ANUAL", 3),
+        ("DOSIS DE POR VIDA", 3),
+    ]
+    subcols = ["Hp(10)", "Hp(0.07)", "Hp(3)"]
+
+    col = 1
+    for text, span in headers_lvl1:
+        c0 = col; c1 = col + span - 1
+        ws.merge_cells(start_row, c0, start_row, c1)
+        _cell(ws, start_row, c0, text, bold=True, center=True, fill="DDDDDD")
+        col += span
+
+    row2 = start_row + 1
+    for c in range(1, 7): ws.merge_cells(start_row, c, row2, c)
+    grp_starts = [7, 10, 13]
+    for base in grp_starts:
+        for j, txt in enumerate(subcols):
+            _cell(ws, row2, base + j, txt, bold=True, center=True, fill="EEEEEE")
+
+    body_row = start_row + 2
+    ws.freeze_panes = ws.cell(body_row, 1)
+
+    for i, r in df_reporte.iterrows():
+        rr = body_row + i
+        _cell(ws, rr, 1,  r.get("PERIODO DE LECTURA",""))
+        _cell(ws, rr, 2,  r.get("CÓDIGO DE USUARIO",""), center=True)
+        _cell(ws, rr, 3,  r.get("NOMBRE",""))
+        _cell(ws, rr, 4,  r.get("CÉDULA",""), center=True)
+        _cell(ws, rr, 5,  r.get("FECHA DE LECTURA",""), center=True)
+        _cell(ws, rr, 6,  r.get("TIPO DE DOSÍMETRO",""), center=True)
+
+        _cell(ws, rr, 7,  _fmt_hp(r.get("Hp (10)","")), center=True)
+        _cell(ws, rr, 8,  _fmt_hp(r.get("Hp (0.07)","")), center=True)
+        _cell(ws, rr, 9,  _fmt_hp(r.get("Hp (3)","")), center=True)
+
+        _cell(ws, rr,10, _fmt_hp(r.get("Hp (10) ANUAL","")), center=True)
+        _cell(ws, rr,11, _fmt_hp(r.get("Hp (0.07) ANUAL","")), center=True)
+        _cell(ws, rr,12, _fmt_hp(r.get("Hp (3) ANUAL","")), center=True)
+
+        _cell(ws, rr,13, _fmt_hp(r.get("Hp (10) DE POR VIDA","")), center=True)
+        _cell(ws, rr,14, _fmt_hp(r.get("Hp (0.07) DE POR VIDA","")), center=True)
+        # Si quieres Hp(3) DE POR VIDA como col 15, añade otra columna/anchos.
+
+    last_row = body_row + len(df_reporte) - 1
+    for r in ws.iter_rows(min_row=start_row, max_row=last_row, min_col=1, max_col=14):
+        for c in r:
+            if c.border is None or c.border.left.style is None: c.border = _b()
+
+    # Hoja de información
+    ws2 = wb.create_sheet("INFORMACIÓN")
+    _set_col_widths(ws2, [30, 100])
+    ws2.merge_cells("A1:B1"); _title(ws2, "A1", "INFORMACIÓN DEL REPORTE DE DOSIMETRÍA", size=12)
+
+    info_rows = [
+        ("– Periodo de lectura:", "periodo de uso del dosímetro personal."),
+        ("– Fecha de lectura:", "corresponde a la fecha en que fue realizada la lectura del dosímetro."),
+        ("– Tipo de dosímetro:", ""),
+    ]
+    r0 = 3
+    for idx, (a, b) in enumerate(info_rows):
+        _cell(ws2, r0+idx, 1, a, bold=True, border=False)
+        _cell(ws2, r0+idx, 2, b, border=False)
+
+    r = r0 + len(info_rows) + 1
+    _label(ws2, f"A{r}", "CE = Cuerpo Entero\nA = Anillo\nB = Brazalete\nCR = Cristalino", bold=False)
+    ws2.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+
+    r += 2
+    _label(ws2, f"A{r}", "– DATOS DEL PARTICIPANTE:")
+    r += 1
+    bullets = [
+        "Código de usuario: Número único asignado al usuario por Microsievert, S.A.",
+        "Nombre: Persona a la cual se le asigna el dosímetro personal.",
+        "Cédula: Número del documento de identidad personal del usuario.",
+        "Fecha de nacimiento: Registro de la fecha de nacimiento del usuario.",
+    ]
+    for b in bullets:
+        _cell(ws2, r, 1, "•", border=False); _cell(ws2, r, 2, b, border=False); r += 1
+
+    r += 1
+    _label(ws2, f"A{r}", "– DOSIS EN MILISIEVERT:")
+    r += 1
+    table = [
+        ("Nombre", "Definición", "Unidad"),
+        ("Dosis efectiva", "Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 10 mm, bajo determinado punto", "mSv"),
+        ("Dosis equivalente superficial", "Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 0,07 mm, bajo determinado punto", "mSv"),
+        ("Dosis equivalente a cristalino", "Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 3 mm, bajo determinado punto del", "mSv"),
+    ]
+    for i, row in enumerate(table):
+        rr = r + i
+        for j, val in enumerate(row, start=1):
+            _cell(ws2, rr, j, val, bold=(i==0), border=True)
+
+    r = r + len(table) + 2
+    notes = [
+        "LECTURAS DE ANILLO: las lecturas del dosímetro de anillo son registradas como una dosis equivalente superficial Hp(0.7)",
+        "Los resultados de las dosis individuales de radiación son reportados para diferentes periodos de tiempo:",
+        "DOSÍMETRO DE CONTROL: incluido en cada paquete entregado para monitorear la exposición a la radiación recibida durante el tránsito y almacenamiento.",
+        'POR DEBAJO DEL MÍNIMO DETECTADO: es la dosis por debajo de la cantidad mínima reportada para el periodo de uso y son registradas como "PM".',
+    ]
+    for t in notes:
+        _cell(ws2, r, 1, "–", border=False); _cell(ws2, r, 2, t, border=False); r += 1
+
+    buf = io.BytesIO(); wb.save(buf)
+    return buf.getvalue()
 
 # ===================== UI: Tabs =====================
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
@@ -687,10 +778,8 @@ with tab1:
     def _hp_value_for_upload(v, as_text_pm=True):
         if isinstance(v, str) and v.strip().upper() == "PM":
             return "PM" if as_text_pm else None
-        try:
-            num = float(v)
-        except Exception:
-            return v if v is not None else None
+        try: num = float(v)
+        except Exception: return v if v is not None else None
         return f"{num:.2f}" if as_text_pm else num
 
     if st.button("⬆️ Subir a Ninox (BASE DE DATOS)"):
@@ -730,47 +819,22 @@ with tab1:
 # ------------------ TAB 2 ------------------
 with tab2:
     st.subheader("📊 Reporte Final (CONTROL primero y luego PERSONAS)")
-
     fuente = st.radio("Fuente de datos para el reporte:", [
         "Usar datos procesados en esta sesión",
         "Leer directamente de Ninox (tabla BASE DE DATOS)",
     ], index=0)
 
-    # Selector de tabla Ninox cuando se lee de Ninox
-    tabla_ninox = "BASE DE DATOS"
     if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
         try:
-            tablas = ninox_list_tables(TEAM_ID, DATABASE_ID)
-            opciones = [t.get("name","") for t in tablas]
-            if opciones:
-                tabla_ninox = st.selectbox(
-                    "Tabla de Ninox a leer",
-                    opciones,
-                    index=(opciones.index("BASE DE DATOS") if "BASE DE DATOS" in opciones else 0)
-                )
-        except Exception as e:
-            st.warning(f"No se pudieron listar tablas de Ninox: {e}")
-
-    cliente_filtro = None
-    if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
-        try:
-            with st.spinner(f"Leyendo registros desde Ninox (tabla: {tabla_ninox})…"):
-                recs = ninox_list_records(tabla_ninox, limit=1000)
-            st.caption(f"Registros crudos recibidos: {len(recs)}")
-            df_nx = ninox_records_to_df(recs)
-
+            with st.spinner("Leyendo registros desde Ninox…"):
+                recs = ninox_list_records(TABLE_WRITE_NAME, limit=1000)
+                df_nx = ninox_records_to_df(recs)
             if df_nx.empty:
-                st.warning("No se recibieron registros útiles desde Ninox (después del mapeo de columnas).")
-                if recs:
-                    st.write("Ejemplo de payload recibido (primer registro):")
-                    st.json(recs[0])
+                st.warning("No se recibieron registros desde Ninox.")
             else:
-                st.success(f"Filas útiles para reporte: {len(df_nx)}")
-                # Guardamos en sesión para reusar el mismo pipeline (reporte único)
                 st.session_state.df_final_vista = df_nx.copy()
                 tmp = df_nx.copy()
-                for h in ["Hp (10)","Hp (0.07)","Hp (3)"]:
-                    tmp[h] = tmp[h].apply(hp_to_num)
+                for h in ["Hp (10)","Hp (0.07)","Hp (3)"]: tmp[h] = tmp[h].apply(hp_to_num)
                 tmp["_Hp10_NUM"]  = tmp["Hp (10)"]
                 tmp["_Hp007_NUM"] = tmp["Hp (0.07)"]
                 tmp["_Hp3_NUM"]   = tmp["Hp (3)"]
@@ -779,25 +843,22 @@ with tab2:
                     "CÓDIGO DE USUARIO","CÓDIGO DE DOSÍMETRO","NOMBRE","CÉDULA",
                     "TIPO DE DOSÍMETRO","FECHA DE LECTURA"
                 ]].copy()
-
         except Exception as e:
             st.error(f"Error leyendo Ninox: {e}")
 
     df_vista = st.session_state.get("df_final_vista")
     df_num   = st.session_state.get("df_final_num")
+
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
-        # Filtro por Cliente
+        # Filtro por cliente
         clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
-        if clientes:
-            cliente_sel = st.selectbox("Filtrar por CLIENTE (opcional)", ["(Todos)"] + clientes, index=0)
-            if cliente_sel != "(Todos)":
-                cliente_filtro = cliente_sel
-                df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
-                df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
+        cliente_sel = st.selectbox("Filtrar por CLIENTE (opcional)", ["(Todos)"] + clientes, index=0)
+        if cliente_sel != "(Todos)":
+            df_vista = df_vista[df_vista["CLIENTE"] == cliente_sel].copy()
+            df_num   = df_num[df_num["CLIENTE"] == cliente_sel].copy()
 
-        # Construimos la tabla única
         reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
         if reporte.empty:
             st.info("No hay datos para el reporte con el filtro aplicado.")
@@ -808,14 +869,19 @@ with tab2:
             csv_bytes = reporte.to_csv(index=False).encode("utf-8-sig")
             st.download_button("⬇️ Descargar CSV", data=csv_bytes, file_name="Reporte_Final.csv", mime="text/csv")
 
-            # Excel (usando openpyxl, sin xlsxwriter)
-            out_buf = io.BytesIO()
-            with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-                reporte.to_excel(writer, index=False, sheet_name="REPORTE")
-            st.download_button(
-                "⬇️ Descargar Excel",
-                data=out_buf.getvalue(),
-                file_name="Reporte_Final.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            # Metadatos para el encabezado del Excel formateado
+            fecha_emision_ui = st.date_input("Fecha de emisión", value=datetime.now().date()).strftime("%Y-%m-%d")
+            cliente_ui = cliente_sel if cliente_sel != "(Todos)" else (str(reporte["CLIENTE"].iloc[0]) if "CLIENTE" in reporte.columns and not reporte.empty else "")
+            codigo_reporte_ui = st.text_input("Código del reporte (opcional)", value="")
+
+            excel_bytes = build_excel_like_example(
+                df_reporte=reporte,
+                fecha_emision=fecha_emision_ui,
+                cliente=cliente_ui,
+                codigo_reporte=codigo_reporte_ui or "SIN-CÓDIGO",
             )
+            st.download_button("⬇️ Descargar Excel (formato ejemplo)",
+                               data=excel_bytes,
+                               file_name="Reporte_Final_Formateado.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
