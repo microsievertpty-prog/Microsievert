@@ -615,7 +615,7 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
 
     # Tipo de dosímetro (izq) y límites (der)
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
-    ws.cell(row,1,"– Tipo de dosímetro:"); _box(ws,row,1,row,7); row += 1
+    ws.cell(row,1,"– Tipo de dosímetro:"); _box(ws,row,1,row,6); row += 1
 
     r0 = row
     for i, texto in enumerate(["CE = Cuerpo Entero","A = Anillo","B = Brazalete","CR = Cristalino"]):
@@ -868,4 +868,5 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
