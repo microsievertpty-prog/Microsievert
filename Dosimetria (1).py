@@ -588,7 +588,7 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     start_data = row + 1
     cols = ["PERIODO DE LECTURA","CÓDIGO DE USUARIO","NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
             "Hp (10)","Hp (0.07)","Hp (3)","Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA"]
+            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA", "Hp (3) DE POR VIDA" ]
     df_to_write = df_reporte[[c for c in cols if c in df_reporte.columns]].copy()
     # Encajar en columnas 1..15
     for rr in dataframe_to_rows(df_to_write, index=False, header=False):
@@ -868,5 +868,6 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
