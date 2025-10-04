@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import re
 import io
-import os
 import unicodedata
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
@@ -11,11 +10,11 @@ import requests
 import streamlit as st
 from datetime import datetime
 
-# ========= Excel (openpyxl) =========
+# ====== Excel helpers (openpyxl) ======
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
+from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImage
-
 
 # ===================== NINOX CONFIG =====================
 API_TOKEN   = "edf312a0-98b8-11f0-883e-db77626d62e5"
@@ -502,17 +501,221 @@ def consolidar_para_upload(df_vista: pd.DataFrame, df_num: pd.DataFrame, umbral_
     out = out.sort_values(sort_keys).reset_index(drop=True)
     return out
 
+# ===================== Excel builder =====================
+def draw_box(ws, r1, c1, r2, c2, color="000000", style="thin"):
+    """Dibuja un recuadro alrededor de [r1:c1]..[r2:c2] sin tocar bordes internos."""
+    side = Side(style=style, color=color)
+    for r in range(r1, r2 + 1):
+        for c in range(c1, c2 + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.border = Border(
+                left   = side if c == c1 else cell.border.left,
+                right  = side if c == c2 else cell.border.right,
+                top    = side if r == r1 else cell.border.top,
+                bottom = side if r == r2 else cell.border.bottom,
+            )
+
+def build_excel_like_example(
+    df_reporte: pd.DataFrame,
+    fecha_emision: str,
+    cliente: str,
+    codigo_reporte: str,
+    logo_bytes: Optional[bytes] = None,
+) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "REPORTE"
+
+    # Anchos de columna (A..N aprox)
+    widths = [22,18,18,18,18,18,18,18,18,18,18,18,18,18]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    # Estilos básicos
+    left   = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    bold   = Font(bold=True, size=12)
+    big    = Font(bold=True, size=14)
+
+    # Encabezado en A1 (multilínea)
+    header_text = "MICROSIEVERT, S.A.\nPH Conardo\nCalle 41 Este, Panamá\nPANAMÁ"
+    ws["A1"].value = header_text
+    ws["A1"].font = big
+    ws["A1"].alignment = left
+    ws.row_dimensions[1].height = 70  # para acomodar líneas
+
+    # Logo en E1 (puedes cambiar a F1 si prefieres)
+    if logo_bytes:
+        img = XLImage(BytesIO(logo_bytes))
+        img.width = 180
+        img.height = 60
+        img.anchor = "E1"   # o "F1"
+        ws.add_image(img)
+
+    # Cuadro Fecha/Cliente/Código en K2:N4
+    start_r, end_r = 2, 4
+    start_c, end_c = 11, 14  # K..N
+    labels = [("Fecha de emisión", fecha_emision), ("Cliente", cliente), ("Código", codigo_reporte)]
+    rr = start_r
+    for label, value in labels:
+        ws.cell(row=rr, column=start_c, value=label).alignment = left
+        ws.cell(row=rr, column=start_c).font = bold
+        ws.merge_cells(start_row=rr, start_column=start_c + 1, end_row=rr, end_column=end_c)
+        vcell = ws.cell(row=rr, column=start_c + 1, value=value)
+        vcell.alignment = left
+        rr += 1
+    draw_box(ws, start_r, start_c, end_r, end_c, color="000000", style="thin")
+
+    # Título tabla de resultados
+    start_table_row = 6
+    ws.merge_cells(start_row=start_table_row, start_column=1, end_row=start_table_row, end_column=14)
+    ws.cell(row=start_table_row, column=1, value="REPORTE DE DOSIMETRÍA").alignment = center
+    ws.cell(row=start_table_row, column=1).font = Font(bold=True, size=13)
+
+    # Cabecera de la tabla (según orden solicitado)
+    table_cols = [
+        "CÓDIGO DE USUARIO","CLIENTE","NOMBRE","CÉDULA",
+        "Hp (10)","Hp (0.07)","Hp (3)",
+        "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
+        "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA",
+        "CÓDIGO DE DOSÍMETRO"  # añadido al final según pedido
+    ]
+    header_row = start_table_row + 2
+    for j, colname in enumerate(table_cols, start=1):
+        cell = ws.cell(row=header_row, column=j, value=colname)
+        cell.alignment = center
+        cell.font = bold
+        cell.fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+
+    # Filas de datos
+    data_row = header_row + 1
+    if not df_reporte.empty:
+        # Asegurar columnas presentes
+        for c in table_cols:
+            if c not in df_reporte.columns:
+                df_reporte[c] = ""
+        # Escribir
+        for _, row in df_reporte[table_cols].iterrows():
+            for j, colname in enumerate(table_cols, start=1):
+                val = row[colname]
+                ws.cell(row=data_row, column=j, value=val)
+            data_row += 1
+
+    # Marco de la tabla completa (cabecera + datos)
+    if data_row > header_row + 1:
+        draw_box(ws, header_row, 1, data_row - 1, len(table_cols), style="thin")
+
+    # ===== Bloque de información debajo de la tabla =====
+    info_start = data_row + 1
+    # Título bloque
+    ws.merge_cells(start_row=info_start, start_column=1, end_row=info_start, end_column=14)
+    ws.cell(row=info_start, column=1, value="INFORMACIÓN DEL REPORTE DE DOSIMETRÍA").font = Font(bold=True, size=12)
+    ws.cell(row=info_start, column=1).alignment = left
+
+    # Sub-bloque: Periodo / Fecha lectura / Tipo dosímetro
+    blk1_r1 = info_start + 2
+    ws.cell(row=blk1_r1, column=1, value="– Periodo de lectura:").font = bold
+    ws.merge_cells(start_row=blk1_r1, start_column=2, end_row=blk1_r1, end_column=14)
+    ws.cell(row=blk1_r1, column=2, value="periodo de uso del dosímetro personal.").alignment = left
+
+    blk1_r2 = blk1_r1 + 1
+    ws.cell(row=blk1_r2, column=1, value="– Fecha de lectura:").font = bold
+    ws.merge_cells(start_row=blk1_r2, start_column=2, end_row=blk1_r2, end_column=14)
+    ws.cell(row=blk1_r2, column=2, value="corresponde a la fecha en que fue realizada la lectura del dosímetro.").alignment = left
+
+    blk1_r3 = blk1_r2 + 1
+    ws.cell(row=blk1_r3, column=1, value="– Tipo de dosímetro:").font = bold
+    ws.merge_cells(start_row=blk1_r3, start_column=2, end_row=blk1_r3, end_column=14)
+    ws.cell(row=blk1_r3, column=2, value="CE = Cuerpo Entero, A = Anillo, B = Brazalete, CR = Cristalino").alignment = left
+
+    # Enmarcar sub-bloque 1
+    draw_box(ws, blk1_r1, 1, blk1_r3, 14, style="thin")
+
+    # Sub-bloque: Datos del participante
+    blk2_r1 = blk1_r3 + 2
+    ws.cell(row=blk2_r1, column=1, value="– DATOS DEL PARTICIPANTE:").font = bold
+    ws.merge_cells(start_row=blk2_r1, start_column=1, end_row=blk2_r1, end_column=14)
+    ws.cell(row=blk2_r1, column=1).alignment = left
+
+    blk2_r2 = blk2_r1 + 1
+    ws.merge_cells(start_row=blk2_r2, start_column=1, end_row=blk2_r2, end_column=14)
+    ws.cell(row=blk2_r2, column=1, value="- Código de usuario: Número único asignado al usuario por Microsievert, S.A.").alignment = left
+
+    blk2_r3 = blk2_r2 + 1
+    ws.merge_cells(start_row=blk2_r3, start_column=1, end_row=blk2_r3, end_column=14)
+    ws.cell(row=blk2_r3, column=1, value="- Nombre: Persona a la cual se le asigna el dosímetro personal.").alignment = left
+
+    blk2_r4 = blk2_r3 + 1
+    ws.merge_cells(start_row=blk2_r4, start_column=1, end_row=blk2_r4, end_column=14)
+    ws.cell(row=blk2_r4, column=1, value="- Cédula: Número del documento de identidad personal del usuario.").alignment = left
+
+    blk2_r5 = blk2_r4 + 1
+    ws.merge_cells(start_row=blk2_r5, start_column=1, end_row=blk2_r5, end_column=14)
+    ws.cell(row=blk2_r5, column=1, value="- Fecha de nacimiento: Registro de la fecha de nacimiento del usuario.").alignment = left
+
+    draw_box(ws, blk2_r1, 1, blk2_r5, 14, style="thin")
+
+    # Sub-bloque: Dosis en mSv (tabla pequeña)
+    blk3_r1 = blk2_r5 + 2
+    ws.cell(row=blk3_r1, column=1, value="– DOSIS EN MILISIEVERT:").font = bold
+    ws.merge_cells(start_row=blk3_r1, start_column=1, end_row=blk3_r1, end_column=14)
+    ws.cell(row=blk3_r1, column=1).alignment = left
+
+    # Cabeceras mini tabla
+    mini_header = ["Nombre","Definición","Unidad"]
+    mini_rh = blk3_r1 + 1
+    for j, t in enumerate(mini_header, start=1):
+        cell = ws.cell(row=mini_rh, column=j, value=t)
+        cell.font = bold
+        cell.alignment = center
+        cell.fill = PatternFill(start_color="EFEFEF", end_color="EFEFEF", fill_type="solid")
+
+    # Filas mini tabla
+    rows_info = [
+        ("Dosis efectiva", "Es la dosis equivalente en tejido blando a 10 mm de profundidad.", "mSv"),
+        ("Dosis equivalente superficial", "Dosis equivalente a 0,07 mm de profundidad en tejido blando.", "mSv"),
+        ("Dosis equivalente a cristalino", "Dosis equivalente a 3 mm de profundidad.", "mSv"),
+    ]
+    rr = mini_rh + 1
+    for (n, d, u) in rows_info:
+        ws.cell(row=rr, column=1, value=n).alignment = left
+        ws.merge_cells(start_row=rr, start_column=2, end_row=rr, end_column=13)
+        ws.cell(row=rr, column=2, value=d).alignment = left
+        ws.cell(row=rr, column=14, value=u).alignment = center
+        rr += 1
+    draw_box(ws, mini_rh, 1, rr-1, 14, style="thin")
+
+    # Sub-bloque: Aclaraciones finales
+    blk4_r1 = rr + 2
+    ws.merge_cells(start_row=blk4_r1, start_column=1, end_row=blk4_r1, end_column=14)
+    ws.cell(row=blk4_r1, column=1, value="LECTURAS DE ANILLO: registradas como dosis equivalente superficial Hp(0.07).").alignment = left
+
+    blk4_r2 = blk4_r1 + 1
+    ws.merge_cells(start_row=blk4_r2, start_column=1, end_row=blk4_r2, end_column=14)
+    ws.cell(row=blk4_r2, column=1, value="DOSÍMETRO DE CONTROL: incluido en cada paquete para monitorear exposición durante tránsito y almacenamiento.").alignment = left
+
+    blk4_r3 = blk4_r2 + 1
+    ws.merge_cells(start_row=blk4_r3, start_column=1, end_row=blk4_r3, end_column=14)
+    ws.cell(row=blk4_r3, column=1, value="POR DEBAJO DEL MÍNIMO DETECTADO (PM): dosis por debajo del mínimo reportable para el periodo.").alignment = left
+
+    draw_box(ws, blk4_r1, 1, blk4_r3, 14, style="thin")
+
+    # Guardar
+    bio = BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
 # ===================== REPORTE ÚNICO (CONTROL primero) =====================
 def construir_reporte_unico(
     df_vista: pd.DataFrame,
     df_num: pd.DataFrame,
     umbral_pm: float = 0.005,
-    agrupar_control_por: str = "CLIENTE",   # 1 fila de CONTROL por cliente
+    agrupar_control_por: str = "CLIENTE",
 ) -> pd.DataFrame:
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         return pd.DataFrame()
 
-    # ----- PERSONAS -----
+    # PERSONAS
     personas_num = df_num[~df_num["NOMBRE"].apply(is_control_name)].copy()
     if not personas_num.empty:
         per_anual = personas_num.groupby("CÓDIGO DE USUARIO", as_index=False).agg({
@@ -547,7 +750,7 @@ def construir_reporte_unico(
             "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
         ])
 
-    # ----- CONTROL (una fila por CLIENTE) -----
+    # CONTROL (una fila por CLIENTE)
     control_v = df_vista[df_vista["NOMBRE"].apply(is_control_name)].copy()
     if not control_v.empty:
         for h in safe_cols(control_v, ["Hp (10)","Hp (0.07)","Hp (3)"]):
@@ -599,272 +802,12 @@ def construir_reporte_unico(
     reporte = pd.concat([ctrl_final, personas_final], ignore_index=True)
     if not reporte.empty:
         reporte["__is_control__"] = reporte["NOMBRE"].apply(is_control_name)
-        # Ordena con CONTROL primero y después por CÓDIGO DE DOSÍMETRO cuando exista
-        sort_cols = ["__is_control__", "NOMBRE", "CÉDULA", "CÓDIGO DE USUARIO", "CÓDIGO DE DOSÍMETRO"]
-        sort_cols = [c for c in sort_cols if c in reporte.columns]
-        reporte = reporte.sort_values(by=sort_cols, ascending=[False, True, True, True, True]).drop(columns=["__is_control__"])
+        # Orden por CODIGO DE DOSÍMETRO si quieres ordenarlo así (puedes ajustar):
+        reporte = reporte.sort_values(
+            by=["__is_control__","CÓDIGO DE DOSÍMETRO","CÓDIGO DE USUARIO","NOMBRE"],
+            ascending=[False, True, True, True]
+        ).drop(columns=["__is_control__"])
     return reporte
-
-# ===================== GENERAR EXCEL (igual al ejemplo, logo + info debajo) =====================
-def build_excel_like_example(
-    df_reporte: pd.DataFrame,
-    fecha_emision: Optional[str] = None,
-    cliente: Optional[str] = None,
-    codigo_reporte: Optional[str] = None,
-    logo_bytes: Optional[bytes] = None,
-) -> bytes:
-    THIN = Side(style="thin", color="000000")
-    BORDER_ALL = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-
-    H_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    H_LEFT   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
-
-    FONT_TITLE   = Font(bold=True, size=14, color="000000")
-    FONT_HEADER  = Font(bold=True, size=11, color="000000")
-    FONT_TEXT    = Font(size=10, color="000000")
-
-    FILL_HEADER  = PatternFill("solid", fgColor="DDDDDD")
-    FILL_LIGHT   = PatternFill("solid", fgColor="F2F2F2")
-
-    def _box(ws, r0, c0, r1, c1, *, header=False, fill=None):
-        for r in range(r0, r1 + 1):
-            for c in range(c0, c1 + 1):
-                cell = ws.cell(r, c)
-                cell.border = BORDER_ALL
-                cell.alignment = H_CENTER if header else H_LEFT
-                if fill is not None:
-                    cell.fill = fill
-                if header:
-                    cell.font = FONT_HEADER
-                else:
-                    if not cell.font or not cell.font.bold:
-                        cell.font = FONT_TEXT
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "REPORTE"
-
-    widths = [16, 16, 30, 18, 20, 18, 10, 10, 10, 10, 10, 10, 10, 10, 10]
-    for col, w in enumerate(widths, start=1):
-        ws.column_dimensions[chr(ord("A") + col - 1)].width = w
-
-    row = 1
-
-    # Logo
-    if logo_bytes:
-        try:
-            img = XLImage(BytesIO(logo_bytes))
-            img.width = 140
-            img.height = 140
-            ws.add_image(img, "A1")
-        except Exception:
-            pass
-
-    # Datos empresa
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
-    ws.cell(row, 1, "MICROSIEVERT, S.A.").font = Font(bold=True, size=12)
-    row += 1
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7); ws.cell(row,1,"PH Conardo")
-    row += 1
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7); ws.cell(row,1,"Calle 41 Este, Panamá")
-    row += 1
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7); ws.cell(row,1,"PANAMÁ")
-    row += 2
-
-    # Fecha/Cliente/Código derecha
-    fecha_emision = fecha_emision or datetime.today().strftime("%d/%m/%Y")
-    ws.merge_cells(start_row=row, start_column=11, end_row=row, end_column=12); ws.cell(row,11,"Fecha de emisión").alignment = H_CENTER
-    ws.merge_cells(start_row=row, start_column=13, end_row=row, end_column=15); ws.cell(row,13, fecha_emision).alignment = H_CENTER
-    row += 1
-    ws.merge_cells(start_row=row, start_column=11, end_row=row, end_column=12); ws.cell(row,11,"Cliente").alignment = H_CENTER
-    ws.merge_cells(start_row=row, start_column=13, end_row=row, end_column=15); ws.cell(row,13, (cliente or "")).alignment = H_CENTER
-    row += 1
-    ws.merge_cells(start_row=row, start_column=11, end_row=row, end_column=12); ws.cell(row,11,"Código").alignment = H_CENTER
-    ws.merge_cells(start_row=row, start_column=13, end_row=row, end_column=15); ws.cell(row,13, (codigo_reporte or "SIN-CÓDIGO")).alignment = H_CENTER
-    row += 2
-
-    # Título
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    t = ws.cell(row, 1, "REPORTE DE DOSIMETRÍA")
-    t.font = Font(bold=True, size=14)
-    t.alignment = H_CENTER
-    row += 1
-
-    # Cabecera agrupada (sin duplicados)
-    _box(ws, row, 1, row, 15, header=True, fill=FILL_LIGHT)
-    ws.merge_cells(start_row=row, start_column=7,  end_row=row, end_column=9)
-    ws.cell(row,7,  "DOSIS EN MILISIEVERT (mSv) — DOSIS").alignment = H_CENTER
-    ws.merge_cells(start_row=row, start_column=10, end_row=row, end_column=12)
-    ws.cell(row,10, "DOSIS ANUAL").alignment = H_CENTER
-    ws.merge_cells(start_row=row, start_column=13, end_row=row, end_column=15)
-    ws.cell(row,13, "DOSIS DE POR VIDA").alignment = H_CENTER
-    row += 1
-
-    # Subcabecera
-    headers = [
-        "PERIODO DE LECTURA", "CÓDIGO DE USUARIO", "NOMBRE", "CÉDULA", "FECHA DE LECTURA",
-        "TIPO DE DOSÍMETRO",
-        "Hp(10)", "Hp(0.07)", "Hp(3)",
-        "Hp(10)", "Hp(0.07)", "Hp(3)",
-        "Hp(10)", "Hp(0.07)", "Hp(3)"
-    ]
-    for c, h in enumerate(headers, start=1):
-        cell = ws.cell(row, c, h)
-        cell.alignment = H_CENTER
-        cell.font = Font(bold=True, size=11)
-        cell.fill = FILL_HEADER
-        cell.border = BORDER_ALL
-
-    # Datos
-    start_data_row = row + 1
-    if not df_reporte.empty:
-        expected_cols = [
-            "PERIODO DE LECTURA","CÓDIGO DE USUARIO","NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
-            "Hp (10)","Hp (0.07)","Hp (3)",
-            "Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL",
-            "Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"
-        ]
-        for col in expected_cols:
-            if col not in df_reporte.columns:
-                df_reporte[col] = ""
-        view = df_reporte[expected_cols].copy()
-
-        for i, (_, r) in enumerate(view.iterrows(), start=start_data_row):
-            values = [
-                r["PERIODO DE LECTURA"], r["CÓDIGO DE USUARIO"], r["NOMBRE"], r["CÉDULA"],
-                r["FECHA DE LECTURA"], r["TIPO DE DOSÍMETRO"],
-                r["Hp (10)"], r["Hp (0.07)"], r["Hp (3)"],
-                r["Hp (10) ANUAL"], r["Hp (0.07) ANUAL"], r["Hp (3) ANUAL"],
-                r["Hp (10) DE POR VIDA"], r["Hp (0.07) DE POR VIDA"], r["Hp (3) DE POR VIDA"],
-            ]
-            for c, v in enumerate(values, start=1):
-                cell = ws.cell(i, c, v)
-                cell.alignment = H_CENTER if c >= 7 else H_LEFT
-                cell.border = BORDER_ALL
-                cell.font = FONT_TEXT
-
-        last_data_row = start_data_row + len(view) - 1
-    else:
-        last_data_row = start_data_row - 1
-
-    row = last_data_row + 2
-
-    # ================== BLOQUE INFORMATIVO (debajo) ==================
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row,1,"INFORMACIÓN DEL REPORTE DE DOSIMETRÍA").font = Font(bold=True, size=11)
-    ws.cell(row,1).alignment = H_CENTER
-    row += 2
-
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row,1,"– Periodo de lectura: periodo de uso del dosímetro personal.")
-    _box(ws, row, 1, row, 15); row += 2
-
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row,1,"– Fecha de lectura: corresponde a la fecha en que fue realizada la lectura del dosímetro.")
-    _box(ws, row, 1, row, 15); row += 2
-
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row,1,"– Tipo de dosímetro:"); _box(ws, row, 1, row, 15); row += 2
-
-    # Caja equivalencias (izquierda)
-    left_r0 = row
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6);  ws.cell(row,2,"CE = Cuerpo Entero").alignment = H_CENTER; _box(ws, row, 2, row, 6)
-    row += 1
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6);  ws.cell(row,2,"A = Anillo").alignment = H_CENTER; _box(ws, row, 2, row, 6)
-    row += 1
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6);  ws.cell(row,2,"B = Brazalete").alignment = H_CENTER; _box(ws, row, 2, row, 6)
-    row += 1
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6);  ws.cell(row,2,"CR = Cristalino").alignment = H_CENTER; _box(ws, row, 2, row, 6)
-    left_r1 = row
-    _box(ws, left_r0, 2, left_r1, 6)
-
-    # Caja límites (derecha)
-    row = left_r0
-    ws.merge_cells(start_row=row, start_column=8, end_row=row, end_column=15)
-    ws.cell(row,8,"LÍMITES ANUALES DE EXPOSICIÓN A RADIACIONES").alignment = H_CENTER
-    _box(ws, row, 8, row, 15, header=True, fill=PatternFill("solid", fgColor="EEEEEE"))
-    row += 1
-
-    limites = [
-        ("Cuerpo Entero", "20mSv/año"),
-        ("Cristalino", "150 mSv/año"),
-        ("Extremidades y piel", "500 mSv/año"),
-        ("Fetal", "1 mSv/periodo de gestación"),
-        ("Público", "1 mSv/año"),
-    ]
-    for nom, val in limites:
-        ws.merge_cells(start_row=row, start_column=8, end_row=row, end_column=11); ws.cell(row,8, nom).alignment = H_CENTER
-        ws.merge_cells(start_row=row, start_column=12, end_row=row, end_column=15); ws.cell(row,12, val).alignment = H_CENTER
-        _box(ws, row, 8, row, 15)
-        row += 1
-
-    row = left_r1 + 2
-
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row,1,"– DATOS DEL PARTICIPANTE:"); _box(ws, row, 1, row, 15, header=True, fill=PatternFill("solid", fgColor="EEEEEE"))
-    row += 1
-    bullets = [
-        "- Código de usuario: Número único asignado al usuario por Microsievert, S.A.",
-        "- Nombre: Persona a la cual se le asigna el dosímetro personal.",
-        "- Cédula: Número del documento de identidad personal del usuario.",
-        "- Fecha de nacimiento: Registro de la fecha de nacimiento del usuario."
-    ]
-    for b in bullets:
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15); ws.cell(row,1,b); _box(ws, row, 1, row, 15); row += 1
-    row += 1
-
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row,1,"– DOSIS EN MILISIEVERT:"); _box(ws, row, 1, row, 15, header=True, fill=PatternFill("solid", fgColor="EEEEEE"))
-    row += 2
-
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6);  ws.cell(row,2,"Nombre").alignment = H_CENTER
-    ws.merge_cells(start_row=row, start_column=7, end_row=row, end_column=13); ws.cell(row,7,"Definición").alignment = H_CENTER
-    ws.merge_cells(start_row=row, start_column=14, end_row=row, end_column=15); ws.cell(row,14,"Unidad").alignment = H_CENTER
-    _box(ws, row, 2, row, 15, header=True, fill=PatternFill("solid", fgColor="DDDDDD")); row += 1
-
-    dosis_tabla = [
-        ("Dosis efectiva", "Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 10 mm, bajo determinado punto", "mSv"),
-        ("Dosis equivalente superficial", "Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 0,07 mm, bajo determinado punto", "mSv"),
-        ("Dosis equivalente a cristalino", "Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 3 mm, bajo determinado punto del", "mSv"),
-    ]
-    for n, d, u in dosis_tabla:
-        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6);  ws.cell(row,2,n)
-        ws.merge_cells(start_row=row, start_column=7, end_row=row, end_column=13); ws.cell(row,7,d)
-        ws.merge_cells(start_row=row, start_column=14, end_row=row, end_column=15); ws.cell(row,14,u).alignment = H_CENTER
-        _box(ws, row, 2, row, 15); row += 1
-    row += 1
-
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row,1,"LECTURAS DE ANILLO: las lecturas del dosímetro de anillo son registradas como una dosis equivalente superficial Hp(0.7)")
-    _box(ws, row, 1, row, 15); row += 2
-
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row,1,"Los resultados de las dosis individuales de radiación son reportados para diferentes periodos de tiempo:")
-    _box(ws, row, 1, row, 15); row += 2
-
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6);  ws.cell(row,2,"DOSIS ACTUAL").alignment = H_CENTER
-    ws.merge_cells(start_row=row, start_column=7, end_row=row, end_column=15); ws.cell(row,7,"Es el correspondiente de dosis acumulada durante el periodo de lectura definido.")
-    _box(ws, row, 2, row, 15); row += 1
-
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6);  ws.cell(row,2,"DOSIS ANUAL").alignment = H_CENTER
-    ws.merge_cells(start_row=row, start_column=7, end_row=row, end_column=15); ws.cell(row,7,"Es el correspondiente de dosis acumulada desde el inicio del año hasta la fecha.")
-    _box(ws, row, 2, row, 15); row += 1
-
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6);  ws.cell(row,2,"DOSIS DE POR VIDA").alignment = H_CENTER
-    ws.merge_cells(start_row=row, start_column=7, end_row=row, end_column=15); ws.cell(row,7,"Es el correspondiente de DOSIS acumulada desde el inicio del servicio dosimétrico hasta la fecha.")
-    _box(ws, row, 2, row, 15); row += 2
-
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row,1,"DOSÍMETRO DE CONTROL: incluido en cada paquete entregado para monitorear la exposición a la radiación recibida durante el tránsito y almacenamiento. Este dosímetro")
-    _box(ws, row, 1, row, 15); row += 2
-
-    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row,1,'POR DEBAJO DEL MÍNIMO DETECTADO: es la dosis por debajo de la cantidad mínima reportada para el período de uso y son registradas como "PM".')
-    _box(ws, row, 1, row, 15); row += 1
-
-    bio = BytesIO()
-    wb.save(bio)
-    return bio.getvalue()
 
 # ===================== UI: Tabs =====================
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
@@ -952,19 +895,19 @@ with tab1:
                 st.error("Nada para subir después de consolidar.")
             else:
                 rows = []
-                for _, rowx in df_para_subir.iterrows():
+                for _, row in df_para_subir.iterrows():
                     fields = {
-                        "PERIODO DE LECTURA": _to_str(rowx.get("PERIODO DE LECTURA","")),
-                        "CLIENTE": _to_str(rowx.get("CLIENTE","")),
-                        "CÓDIGO DE DOSÍMETRO": _to_str(rowx.get("CÓDIGO DE DOSÍMETRO","")),
-                        "CÓDIGO DE USUARIO": _to_str(rowx.get("CÓDIGO DE USUARIO","")),
-                        "NOMBRE": _to_str(rowx.get("NOMBRE","")),
-                        "CÉDULA": _to_str(rowx.get("CÉDULA","")),
-                        "FECHA DE LECTURA": _to_str(rowx.get("FECHA DE LECTURA","")),
-                        "TIPO DE DOSÍMETRO": _to_str(rowx.get("TIPO DE DOSÍMETRO","") or "CE"),
-                        "Hp (10)": _hp_value_for_upload(rowx.get("Hp (10)"), subir_pm_como_texto),
-                        "Hp (0.07)": _hp_value_for_upload(rowx.get("Hp (0.07)"), subir_pm_como_texto),
-                        "Hp (3)": _hp_value_for_upload(rowx.get("Hp (3)"), subir_pm_como_texto),
+                        "PERIODO DE LECTURA": _to_str(row.get("PERIODO DE LECTURA","")),
+                        "CLIENTE": _to_str(row.get("CLIENTE","")),
+                        "CÓDIGO DE DOSÍMETRO": _to_str(row.get("CÓDIGO DE DOSÍMETRO","")),
+                        "CÓDIGO DE USUARIO": _to_str(row.get("CÓDIGO DE USUARIO","")),
+                        "NOMBRE": _to_str(row.get("NOMBRE","")),
+                        "CÉDULA": _to_str(row.get("CÉDULA","")),
+                        "FECHA DE LECTURA": _to_str(row.get("FECHA DE LECTURA","")),
+                        "TIPO DE DOSÍMETRO": _to_str(row.get("TIPO DE DOSÍMETRO","") or "CE"),
+                        "Hp (10)": _hp_value_for_upload(row.get("Hp (10)"), subir_pm_como_texto),
+                        "Hp (0.07)": _hp_value_for_upload(row.get("Hp (0.07)"), subir_pm_como_texto),
+                        "Hp (3)": _hp_value_for_upload(row.get("Hp (3)"), subir_pm_como_texto),
                     }
                     rows.append({"fields": fields})
                 with st.spinner("Subiendo a Ninox..."):
@@ -978,22 +921,15 @@ with tab1:
 # ------------------ TAB 2 ------------------
 with tab2:
     st.subheader("📊 Reporte Final (CONTROL primero y luego PERSONAS)")
+
     fuente = st.radio("Fuente de datos para el reporte:", [
         "Usar datos procesados en esta sesión",
         "Leer directamente de Ninox (tabla BASE DE DATOS)",
     ], index=0)
 
-    # Parámetros del encabezado del Excel
-    col1, col2, col3 = st.columns([1,1,1])
-    with col1:
-        fecha_emision_ui = st.date_input("Fecha de emisión", value=datetime.today()).strftime("%d/%m/%Y")
-    with col2:
-        codigo_reporte_ui = st.text_input("Código del reporte (opcional)", value="")
-    with col3:
-        logo_file = st.file_uploader("Logo (PNG/JPG opcional)", type=["png","jpg","jpeg"], key="upl_logo")
-        logo_bytes = logo_file.read() if logo_file else None
+    # Subida de logo
+    upl_logo = st.file_uploader("Logo (opcional, PNG/JPG)", type=["png","jpg","jpeg"], key="upl_logo")
 
-    cliente_filtro = None
     if fuente == "Leer directamente de Ninox (tabla BASE DE DATOS)":
         try:
             with st.spinner("Leyendo registros desde Ninox…"):
@@ -1024,39 +960,38 @@ with tab2:
     else:
         # Filtro por Cliente
         clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
-        if clientes:
-            cliente_sel = st.selectbox("Filtrar por CLIENTE (opcional)", ["(Todos)"] + clientes, index=0)
-            if cliente_sel != "(Todos)":
-                cliente_filtro = cliente_sel
-                df_vista = df_vista[df_vista["CLIENTE"] == cliente_filtro].copy()
-                df_num   = df_num[df_num["CLIENTE"] == cliente_filtro].copy()
+        cliente_sel = st.selectbox("Filtrar por CLIENTE (opcional)", ["(Todos)"] + clientes, index=0)
+        if cliente_sel != "(Todos)":
+            df_vista = df_vista[df_vista["CLIENTE"] == cliente_sel].copy()
+            df_num   = df_num[df_num["CLIENTE"] == cliente_sel].copy()
 
-        # Construcción del reporte único
+        # Construimos la tabla única
         reporte = construir_reporte_unico(df_vista, df_num, umbral_pm=0.005, agrupar_control_por="CLIENTE")
         if reporte.empty:
             st.info("No hay datos para el reporte con el filtro aplicado.")
         else:
-            # Orden por CÓDIGO DE DOSÍMETRO si existe
-            if "CÓDIGO DE DOSÍMETRO" in reporte.columns:
-                # Mantener CONTROL primero -> ya viene primero por construir_reporte_unico
-                pass
             st.dataframe(reporte, use_container_width=True)
 
             # Descarga CSV
             csv_bytes = reporte.to_csv(index=False).encode("utf-8-sig")
             st.download_button("⬇️ Descargar CSV", data=csv_bytes, file_name="Reporte_Final.csv", mime="text/csv")
 
-            # Descarga Excel con formato + bloque informativo + logo
+            # Descarga Excel con formato tipo ejemplo
+            fecha_emision = datetime.now().strftime("%d/%m/%Y")
+            cliente_val   = cliente_sel if cliente_sel != "(Todos)" else (reporte["CLIENTE"].iloc[0] if "CLIENTE" in reporte.columns and not reporte["CLIENTE"].isna().all() else "")
+            codigo_ui     = st.text_input("Código del reporte (opcional)", value="SIN-CÓDIGO")
+
+            logo_bytes = upl_logo.read() if upl_logo is not None else None
             excel_bytes = build_excel_like_example(
                 df_reporte=reporte,
-                fecha_emision=fecha_emision_ui,
-                cliente=(cliente_filtro or (reporte["CLIENTE"].iloc[0] if "CLIENTE" in reporte.columns and not reporte.empty else "")),
-                codigo_reporte=codigo_reporte_ui or "SIN-CÓDIGO",
+                fecha_emision=fecha_emision,
+                cliente=cliente_val,
+                codigo_reporte=codigo_ui or "SIN-CÓDIGO",
                 logo_bytes=logo_bytes,
             )
             st.download_button(
-                "⬇️ Descargar Excel (estilo ejemplo)",
+                "⬇️ Descargar Excel (formato ejemplo)",
                 data=excel_bytes,
-                file_name="Reporte_Final.xlsx",
+                file_name="Reporte_Final_Formato.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
