@@ -561,26 +561,35 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     ws.cell(row,6).alignment=Alignment(horizontal="center")
     row += 2
 
-       # Cabecera agrupada
-    cab1 = [("",1,1),("",2,2),("",3,3),("",4,4),
-            ("",5,5),("",6,6),
-            ("DOSIS EN MILISIEVERT (mSv) — DOSIS ACTUAL",7,9),
-            ("DOSIS ANUAL",10,12),("DOSIS DE POR VIDA",13,15)]
-    for txt,c0,c1 in cab1:
-        ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
-        ws.cell(row,c0,txt)
-    _box(ws,row,1,row,15,header=True,fill=LIGHT)
+    # Cabecera agrupada (una fila alta con wrap)
+    cab1 = [
+    ("", 1, 1), ("", 2, 2), ("", 3, 3), ("", 4, 4),
+    ("", 5, 5), ("", 6, 6),
+    ("DOSIS EN MILISIEVERT (mSv)\DOSIS ACTUAL", 7, 9),  # <-- salto de línea
+    ("DOSIS ANUAL", 10, 12),
+    ("DOSIS DE POR VIDA", 13, 15),
+    ]
+
+    for txt, c0, c1 in cab1:
+    ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
+    cell = ws.cell(row, c0, txt)
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    cell.font = Font(bold=True)
+
+    # enmarcar y dar altura generosa
+    _box(ws, row, 1, row, 15, header=True, fill=LIGHT)
+    ws.row_dimensions[row].height = 32  # <- altura suficiente para 2 líneas
     row += 1
 
     # --- Texto explicativo de Hp debajo del título ---
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row, 1, "Hp(10): Dosis efectiva;  Hp(3): Dosis equivalente a cristalino;").alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    _box(ws, row, 1, row, 15)   # marco negro alrededor de la línea
+    ws.cell(row, 17, "Hp(10): Dosis efectiva;  Hp(3): Dosis equivalente a cristalino;").alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    _box(ws, row, 7, row, 15)   # marco negro alrededor de la línea
     row += 1
 
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-    ws.cell(row, 1, "Hp(0.07): Dosis Equivalente Superficial").alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    _box(ws, row, 1, row, 15)
+    ws.cell(row, 7, "Hp(0.07): Dosis Equivalente Superficial").alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    _box(ws, row, 7, row, 15)
     row += 1
     # --- fin texto explicativo ---
 
@@ -881,6 +890,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
