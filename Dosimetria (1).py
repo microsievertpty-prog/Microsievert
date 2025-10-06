@@ -563,8 +563,8 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
 
     # Cabecera agrupada
     cab1 = [("DATOS DEL USUARIO Y DE LA LECTURA DOSIMÉTRICA ",1,6),
-            ("DOSIS ACTUAL",7,9),
-            ("DOSIS ANUAL",10,12),("DOSIS DE POR VIDA",13,15)
+            ("DOSIS ACTUAL (mSv) ",7,9),
+            ("DOSIS ANUAL  (mSv) ",10,12),("DOSIS DE POR VIDA (mSv)",13,15)
     ]
     
     for txt,c0,c1 in cab1:
@@ -869,6 +869,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
