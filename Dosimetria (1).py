@@ -556,8 +556,8 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     _box(ws,row,13,row,15,center=True)
     row += 2
 
-    ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=15)
-    ws.cell(row,6,""DOSIS EN MILISIEVERT (mSv) ").font=Font(bold=True)
+     ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=10)
+    ws.cell(row,6,""DOSIS EN MILISIEVERT (mSv)").font=Font(bold=True)
     ws.cell(row,6).alignment=Alignment(horizontal="center")
     row += 2
 
@@ -868,6 +868,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
