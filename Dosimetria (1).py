@@ -534,55 +534,39 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     ws.cell(row,1,"Calle 41 Este, Panamá"); row+=1
     ws.cell(row,1,"PANAMÁ"); row+=2
 
-    # ── Cuadro Fecha / Cliente / Código (dos columnas) ─────────────────────────────
-    start_r = row - 3          # fila superior del cuadro
-    cL0, cL1 = 10, 12          # K..M  (columna izquierda)
-    cR0, cR1 = 13, 15          # N..P  (columna derecha)
+    ws.merge_cells(start_row=row-3, start_column=10, end_row=row-3, end_column=12)
+    ws.cell(row-3,10,"Fecha de emisión").alignment=Alignment(horizontal="center")
+    _box(ws,row-3,10,row-3,12,header=True,fill=GREY)
+    ws.merge_cells(start_row=row-2, start_column=10, end_row=row-2, end_column=12)
+    ws.cell(row-2,10,fecha_emision).alignment=Alignment(horizontal="center")
+    _box(ws,row-2,10,row-2,12,center=True)
 
-    def _hdr(r, c0, c1, text):
-        ws.merge_cells(start_row=r, start_column=c0, end_row=r, end_column=c1)
-        cell = ws.cell(row=r, column=c0, value=text)
-        cell.font = Font(bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        for cc in range(c0, c1 + 1):
-            ws.cell(r, cc).fill = GREY
-            ws.cell(r, cc).border = BORD
+    ws.merge_cells(start_row=row-3, start_column=13, end_row=row-3, end_column=15)
+    ws.cell(row-3,13,"Cliente").alignment=Alignment(horizontal="center")
+    _box(ws,row-3,13,row-3,15,header=True,fill=GREY)
+    ws.merge_cells(start_row=row-2, start_column=13, end_row=row-2, end_column=15)
+    ws.cell(row-2,13,cliente).alignment=Alignment(horizontal="center")
+    _box(ws,row-2,13,row-2,15,center=True)
 
-    def _val(r, c0, c1, text):
-        ws.merge_cells(start_row=r, start_column=c0, end_row=r, end_column=c1)
-       cell = ws.cell(row=r, column=c0, value=text)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        for cc in range(c0, c1 + 1):
-            ws.cell(r, cc).border = BORD
+    ws.merge_cells(start_row=row-1, start_column=13, end_row=row-1, end_column=15)
+    ws.cell(row-1,13,"Código").alignment=Alignment(horizontal="center")
+    _box(ws,row-1,13,row-1,15,header=True,fill=GREY)
+    ws.merge_cells(start_row=row, start_column=13, end_row=row, end_column=15)
+    ws.cell(row,13,codigo_reporte).alignment=Alignment(horizontal="center")
+    _box(ws,row,13,row,15,center=True)
+    row += 2
 
-    # Fila 1: encabezados "Fecha de emisión" y "Cliente"
-    _hdr(start_r,     cL0, cL1, "Fecha de emisión")
-    _hdr(start_r,     cR0, cR1, "Cliente")
+    ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=10)
+    ws.cell(row,6,"REPORTE DE DOSIMETRÍA").font=Font(bold=True)
+    ws.cell(row,6).alignment=Alignment(horizontal="center")
+    row += 2
 
-    # Fila 2: valores de fecha y cliente
-    _val(start_r + 1, cL0, cL1, fecha_emision)
-    _val(start_r + 1, cR0, cR1, cliente)
-
-    # Fila 3: "Código" (izq) y su valor (der)
-    _hdr(start_r + 2, cL0, cL1, "Código")
-    _val(start_r + 2, cR0, cR1, codigo_reporte)
-
-    # Borde de seguridad en todo el rectángulo
-    for r in range(start_r, start_r + 3):
-        for cc in range(cL0, cR1 + 1):
-            ws.cell(r, cc).border = BORD
-    # ───────────────────────────────────────────────────────────────────────────────
-
-    row += 2  # deja un espacio antes del título "REPORTE DE DOSIMETRÍA"
-
-
-    
     # Cabecera agrupada
     cab1 = [("DATOS DEL USUARIO Y DE LA LECTURA DOSIMÉTRICA ",1,6),
             ("DOSIS ACTUAL (mSv) ",7,9),
             ("DOSIS ANUAL  (mSv) ",10,12),("DOSIS DE POR VIDA (mSv)",13,15)
     ]
-    
+   
     for txt,c0,c1 in cab1:
             ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
             ws.cell(row,c0,txt)
@@ -885,25 +869,6 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
