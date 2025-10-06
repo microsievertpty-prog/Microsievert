@@ -561,35 +561,16 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     ws.cell(row,6).alignment=Alignment(horizontal="center")
     row += 2
 
-    # Cabecera agrupada (fila 'row')
-    cab1 = [
-        ("DATOS DEL USUARIO Y DE LA LECTURA DOSIMÉTRICA", 1, 6),
-        ("DOSIS ACTUAL (mSv)", 7, 9),
-        ("DOSIS ANUAL (mSv)", 10, 12),
-        ("DOSIS DE POR VIDA (mSv)", 13, 15),
-    ]
-
-    # Combinar y poner el texto en la celda superior-izquierda
-    for txt, c0, c1 in cab1:
-        ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
-        ws.cell(row=row, column=c0, value=txt)
-
-    # Dibujar el marco y fondo para TODA la fila una sola vez
-    _box(ws, row, 1, row, 15, header=True, fill=LIGHT)
-
-    # Centrar explícitamente cada bloque combinado (por si _box cambia algo)
-    for _, c0, c1 in cab1:
-        # La celda válida para el valor/alineación es la superior izquierda
-        top_left = ws.cell(row=row, column=c0)
-        top_left.font = Font(bold=True)
-        top_left.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        # (opcional) aplicar la misma alineación a todas las celdas combinadas del bloque
-        for cc in range(c0, c1 + 1):
-            ws.cell(row=row, column=cc).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-    # Altura de la fila para que quepa bien
-    ws.row_dimensions[row].height = 30
-    row += 1
+    # Cabecera agrupada
+        cab1 = [("",1,1),("",2,2),("",3,3),("",4,4),
+            ("",5,5),("",6,6),
+            ("DOSIS ACTUAL",7,9),
+            ("DOSIS ANUAL",10,12),("DOSIS DE POR VIDA",13,15)]
+        for txt,c0,c1 in cab1:
+            ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
+            ws.cell(row,c0,txt)
+        _box(ws,row,1,row,15,header=True,fill=LIGHT)
+        row += 1
 
     # Subcabeceras
     ws.cell(row,1,"PERIODO DE LECTURA")
@@ -887,6 +868,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
