@@ -524,8 +524,8 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
 
     row = 1
     if logo_bytes:
-        img = XLImage(BytesIO(logo_bytes)); img.width=150; img.height=150
-        ws.add_image(img, "A1"); row = 7
+        img = XLImage(BytesIO(logo_bytes)); img.width=231; img.height=107
+        ws.add_image(img, "C1"); row = 7
     else:
         row = 3
 
@@ -868,6 +868,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
