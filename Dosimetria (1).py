@@ -557,15 +557,14 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     row += 2
 
     ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=10)
-    ws.cell(row,6,"DOSIS EN MILISIEVERT (mSv)").font=Font(bold=True)
+    ws.cell(row,6,"REPORTE DE DOSIMETRÍA").font=Font(bold=True)
     ws.cell(row,6).alignment=Alignment(horizontal="center")
     row += 2
 
        # Cabecera agrupada
-    cab1 = [("",1,1),("",2,2),("",3,3),("",4,4),
-            ("",5,5),("",6,6),
-            ("DOSIS ACTUAL",7,9),
-            ("DOSIS ANUAL",10,12),("DOSIS DE POR VIDA",13,15)]
+    cab1 = [("DATOS DEL USUARIO Y DE LA LECTURA DOSÍMETRICA",1,6),
+            ("DOSIS ACTUAL (mSv) ",7,9),
+            ("DOSIS ANUAL (mSv)",10,12),("DOSIS DE POR VIDA (mSv)",13,15)]
     for txt,c0,c1 in cab1:
         ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
         ws.cell(row,c0,txt)
@@ -868,6 +867,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
