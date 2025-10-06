@@ -567,13 +567,12 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     ("DOSIS ACTUAL (mSv)", 7, 9),
     ("DOSIS ANUAL (mSv)", 10, 12),
     ("DOSIS DE POR VIDA (mSv)", 13, 15),
-    ]
-
+    ] 
     for txt, c0, c1 in cab1:
-    ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
-    cell = ws.cell(row=row, column=c0, value=txt)
-    cell.font = Font(bold=True)
-    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
+        cell = ws.cell(row=row, column=c0, value=txt)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     # dibuja el marco y da altura a la fila
     _box(ws, row, 1, row, 15, header=True, fill=LIGHT)
@@ -876,6 +875,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
