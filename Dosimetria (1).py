@@ -572,6 +572,18 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     _box(ws,row,1,row,15,header=True,fill=LIGHT)
     row += 1
 
+    # --- Texto explicativo de Hp debajo del título ---
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
+    ws.cell(row, 1, "Hp(10): Dosis efectiva;  Hp(3): Dosis equivalente a cristalino;").alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    _box(ws, row, 1, row, 15)   # marco negro alrededor de la línea
+    row += 1
+
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
+    ws.cell(row, 1, "Hp(0.07): Dosis Equivalente Superficial").alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    _box(ws, row, 1, row, 15)
+    row += 1
+    # --- fin texto explicativo ---
+
     # Subcabeceras
     ws.cell(row,1,"PERIODO DE LECTURA")
     ws.cell(row,2,"CÓDIGO DE USUARIO")
@@ -584,6 +596,7 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     ws.cell(row,13,"Hp(10)"); ws.cell(row,14,"Hp(0.07)"); ws.cell(row,15,"Hp(3)")
     _box(ws,row,1,row,15,header=True,fill=GREY)
 
+   
     # Datos
     start_data = row + 1
     cols = ["PERIODO DE LECTURA","CÓDIGO DE USUARIO","NOMBRE","CÉDULA","FECHA DE LECTURA","TIPO DE DOSÍMETRO",
@@ -868,6 +881,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
