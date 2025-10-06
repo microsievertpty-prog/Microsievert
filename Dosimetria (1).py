@@ -535,45 +535,45 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     ws.cell(row,1,"PANAMÁ"); row+=2
 
     # ── Cuadro Fecha / Cliente / Código (dos columnas) ─────────────────────────────
-start_r = row - 3          # fila superior del cuadro
-cL0, cL1 = 10, 12          # K..M  (columna izquierda)
-cR0, cR1 = 13, 15          # N..P  (columna derecha)
+    start_r = row - 3          # fila superior del cuadro
+    cL0, cL1 = 10, 12          # K..M  (columna izquierda)
+    cR0, cR1 = 13, 15          # N..P  (columna derecha)
 
-def _hdr(r, c0, c1, text):
-    ws.merge_cells(start_row=r, start_column=c0, end_row=r, end_column=c1)
-    cell = ws.cell(row=r, column=c0, value=text)
-    cell.font = Font(bold=True)
-    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    for cc in range(c0, c1 + 1):
-        ws.cell(r, cc).fill = GREY
-        ws.cell(r, cc).border = BORD
+    def _hdr(r, c0, c1, text):
+        ws.merge_cells(start_row=r, start_column=c0, end_row=r, end_column=c1)
+        cell = ws.cell(row=r, column=c0, value=text)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for cc in range(c0, c1 + 1):
+            ws.cell(r, cc).fill = GREY
+            ws.cell(r, cc).border = BORD
 
-def _val(r, c0, c1, text):
-    ws.merge_cells(start_row=r, start_column=c0, end_row=r, end_column=c1)
-    cell = ws.cell(row=r, column=c0, value=text)
-    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    for cc in range(c0, c1 + 1):
-        ws.cell(r, cc).border = BORD
+    def _val(r, c0, c1, text):
+        ws.merge_cells(start_row=r, start_column=c0, end_row=r, end_column=c1)
+       cell = ws.cell(row=r, column=c0, value=text)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        for cc in range(c0, c1 + 1):
+            ws.cell(r, cc).border = BORD
 
-# Fila 1: encabezados "Fecha de emisión" y "Cliente"
-_hdr(start_r,     cL0, cL1, "Fecha de emisión")
-_hdr(start_r,     cR0, cR1, "Cliente")
+    # Fila 1: encabezados "Fecha de emisión" y "Cliente"
+    _hdr(start_r,     cL0, cL1, "Fecha de emisión")
+    _hdr(start_r,     cR0, cR1, "Cliente")
 
-# Fila 2: valores de fecha y cliente
-_val(start_r + 1, cL0, cL1, fecha_emision)
-_val(start_r + 1, cR0, cR1, cliente)
+    # Fila 2: valores de fecha y cliente
+    _val(start_r + 1, cL0, cL1, fecha_emision)
+    _val(start_r + 1, cR0, cR1, cliente)
 
-# Fila 3: "Código" (izq) y su valor (der)
-_hdr(start_r + 2, cL0, cL1, "Código")
-_val(start_r + 2, cR0, cR1, codigo_reporte)
+    # Fila 3: "Código" (izq) y su valor (der)
+    _hdr(start_r + 2, cL0, cL1, "Código")
+    _val(start_r + 2, cR0, cR1, codigo_reporte)
 
-# Borde de seguridad en todo el rectángulo
-for r in range(start_r, start_r + 3):
-    for cc in range(cL0, cR1 + 1):
-        ws.cell(r, cc).border = BORD
-# ───────────────────────────────────────────────────────────────────────────────
+    # Borde de seguridad en todo el rectángulo
+    for r in range(start_r, start_r + 3):
+        for cc in range(cL0, cR1 + 1):
+            ws.cell(r, cc).border = BORD
+    # ───────────────────────────────────────────────────────────────────────────────
 
-row += 2  # deja un espacio antes del título "REPORTE DE DOSIMETRÍA"
+    row += 2  # deja un espacio antes del título "REPORTE DE DOSIMETRÍA"
 
 
     
@@ -885,6 +885,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
