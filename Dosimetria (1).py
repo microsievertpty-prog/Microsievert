@@ -596,7 +596,7 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
             ws.cell(start_data, j, v)
         start_data += 1
     end_data = start_data - 1
-    _box(ws, row-1, 1, end_data, 16)  # toda la tabla
+    _box(ws, row-1, 1, end_data, 15)  # toda la tabla
 
     # ====== INFORMACIÓN (debajo de la tabla)
     row = end_data + 3
@@ -868,6 +868,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
