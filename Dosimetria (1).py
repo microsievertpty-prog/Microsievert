@@ -565,10 +565,10 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     cab1 = [("DATOS DEL USUARIO Y DE LA LECTURA DOSIMÉTRICA ",1,6),
             ("DOSIS ACTUAL",7,9),
             ("DOSIS ANUAL",10,12),("DOSIS DE POR VIDA",13,15)]
-        for txt,c0,c1 in cab1:
-            ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
-            ws.cell(row,c0,txt)
-        _box(ws,row,1,row,15,header=True,fill=LIGHT)
+            for txt,c0,c1 in cab1:
+                ws.merge_cells(start_row=row, start_column=c0, end_row=row, end_column=c1)
+                ws.cell(row,c0,txt)
+            _box(ws,row,1,row,15,header=True,fill=LIGHT)
         row += 1
 
     # Subcabeceras
@@ -867,6 +867,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
