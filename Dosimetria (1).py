@@ -661,9 +661,9 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     _box(ws,row,2,row,15,header=True,fill=GREY); row += 1
 
     filas_dosis = [
-        ("Dosis efectiva","Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 10 mm, bajo determinado punto","mSv"),
-        ("Dosis equivalente superficial","Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 0,07 mm, bajo determinado punto","mSv"),
-        ("Dosis equivalente a cristalino","Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 3 mm, bajo determinado punto del","mSv"),
+        ("Hp(10) = Dosis efectiva","Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 10 mm, bajo determinado punto","mSv"),
+        ("Hp(0.07) = Dosis equivalente superficial","Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 0,07 mm, bajo determinado punto","mSv"),
+        ("Hp(3) = Dosis equivalente a cristalino","Es la dosis equivalente en tejido blando, J·kg-1 ó Sv a una profundidad de 3 mm, bajo determinado punto del","mSv"),
     ]
     for nom,defin,uni in filas_dosis:
         ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=5); ws.cell(row,2,nom); _box(ws,row,2,row,5)
@@ -676,7 +676,7 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
         "LECTURAS DE ANILLO: las lecturas del dosímetro de anillo son registradas como una dosis equivalente superficial Hp(0.07)",
         "Los resultados de las dosis individuales de radiación son reportados para diferentes periodos de tiempo:",
         "DOSÍMETRO DE CONTROL: incluido en cada paquete entregado para monitorear la exposición a la radiación recibida durante el tránsito y almacenamiento. Este dosímetro",
-        "POR DEBAJO DEL MÍNIMO DETECTADO: es la dosis por debajo de la cantidad mínima reportada para el periodo de uso y son registradas como \"PM\".",
+        "POR DEBAJO DEL MÍNIMO REPORTABLE: es la dosis por debajo de la cantidad mínima reportada para el periodo de uso y son registradas como \"PM\".",
     ]
     for t in textos:
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
@@ -868,6 +868,7 @@ with tab2:
                                data=excel_bytes,
                                file_name="Reporte_Final.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
