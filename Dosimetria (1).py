@@ -471,6 +471,31 @@ def aplicar_resta_control_y_formato(
     return df_vista, df_num
 
 # ============== REPORTE ÚNICO (CONTROL primero) ==============
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.utils.dataframe import dataframe_to_rows
+
+THIN = Side(color="000000", style="thin")
+BORD = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+GREY = PatternFill("solid", fgColor="DDDDDD")
+LIGHT = PatternFill("solid", fgColor="F5F5F5")
+
+def _box(ws, r0, c0, r1, c1, header=False, center=False, fill=None, bold=False):
+    for r in range(r0, r1 + 1):
+        for c in range(c0, c1 + 1):
+            cell = ws.cell(r, c)
+            cell.border = BORD
+            if fill: cell.fill = fill
+            if header:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            elif center:
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            else:
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+            if bold: cell.font = Font(bold=True)
+
 def construir_reporte_unico(
     df_vista: pd.DataFrame,
     df_num: pd.DataFrame,
@@ -607,31 +632,6 @@ def construir_reporte_unico(
     return reporte
 
 # ============== Excel con diseño (como el ejemplo) ==============
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.utils.dataframe import dataframe_to_rows
-
-THIN = Side(color="000000", style="thin")
-BORD = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-GREY = PatternFill("solid", fgColor="DDDDDD")
-LIGHT = PatternFill("solid", fgColor="F5F5F5")
-
-def _box(ws, r0, c0, r1, c1, header=False, center=False, fill=None, bold=False):
-    for r in range(r0, r1 + 1):
-        for c in range(c0, c1 + 1):
-            cell = ws.cell(r, c)
-            cell.border = BORD
-            if fill: cell.fill = fill
-            if header:
-                cell.font = Font(bold=True)
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            elif center:
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            else:
-                cell.alignment = Alignment(vertical="center", wrap_text=True)
-            if bold: cell.font = Font(bold=True)
-
 def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, cliente: str, codigo_reporte: str, logo_bytes: Optional[bytes] = None) -> bytes:
     wb = Workbook(); ws = wb.active; ws.title = "REPORTE"
     widths = {1:14,2:14,3:26,4:16,5:20,6:14,7:10,8:10,9:10,10:10,11:10,12:10,13:10,14:10,15:10}
@@ -714,7 +714,7 @@ def build_excel_like_example(df_reporte: pd.DataFrame, fecha_emision: str, clien
     end_data = start_data - 1
     _box(ws, row-1, 1, end_data, 15)
 
-    # ====== INFORMACIÓN
+    # ====== INFORMACIÓN (igual que tu versión) ======
     row = end_data + 3
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
     ws.cell(row,1,"INFORMACIÓN DEL REPORTE DE DOSIMETRÍA").font=Font(bold=True)
@@ -915,6 +915,192 @@ def _leer_reporte_consolidado(upload) -> Tuple[Optional[pd.DataFrame], Optional[
     ]].copy()
 
     return df_vista, df_num, None
+
+# ============== NUEVO: Helpers para maestro global y anual global ==============
+
+def last_nonempty(s: pd.Series) -> str:
+    """Devuelve el último valor NO vacío/NO 'nan' como texto."""
+    if s is None or len(s) == 0:
+        return ""
+    ss = s.astype(str)
+    mask = ss.str.strip().ne("").fillna(False) & ss.str.upper().ne("NAN")
+    return ss[mask].iloc[-1] if mask.any() else ""
+
+def _to_ts(fecha_str: str):
+    # Acepta dd/mm/YYYY o dd/mm/YYYY HH:MM
+    try:
+        return pd.to_datetime(fecha_str, dayfirst=True, errors="coerce")
+    except Exception:
+        return pd.NaT
+
+def _ensure_cols(df: pd.DataFrame, needed: List[str]) -> None:
+    """Crea columnas vacías si no existen."""
+    for c in needed:
+        if c not in df.columns:
+            df[c] = ""
+
+def _normalize_id_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza nombres de columnas típicos a:
+    - CÓDIGO DE USUARIO
+    - NOMBRE
+    - CÉDULA
+    - FECHA DE LECTURA
+    - PERIODO DE LECTURA
+    """
+    ren_alias = {
+        # código
+        "CODIGO DE USUARIO": "CÓDIGO DE USUARIO",
+        "CODIGO_USUARIO": "CÓDIGO DE USUARIO",
+        "CODIGO USUARIO": "CÓDIGO DE USUARIO",
+        "CÓDIGO_USUARIO": "CÓDIGO DE USUARIO",
+
+        # cédula
+        "CEDULA": "CÉDULA",
+
+        # fecha
+        "FECHA": "FECHA DE LECTURA",
+        "FECHA LECTURA": "FECHA DE LECTURA",
+        "FECHA_LECTURA": "FECHA DE LECTURA",
+
+        # periodo
+        "PERIODO": "PERIODO DE LECTURA",
+        "PERIODO_LECTURA": "PERIODO DE LECTURA",
+        "PERIODO DE LECTURA ": "PERIODO DE LECTURA",
+    }
+    cols_norm = {}
+    for c in df.columns:
+        c2 = str(c).strip()
+        cols_norm[c] = ren_alias.get(c2.upper(), c)
+    out = df.rename(columns=cols_norm)
+    return out
+
+def construir_maestro_usuarios(df_num_global: pd.DataFrame) -> pd.DataFrame:
+    """
+    Maestro global por CÓDIGO DE USUARIO con NOMBRE y CÉDULA fiables.
+    - Acepta alias de columnas.
+    - Si no hay FECHA DE LECTURA usable, usa PERIODO DE LECTURA (primer día del mes).
+    - Hace coalesce “más reciente” -> “último no vacío”.
+    """
+    if df_num_global is None or df_num_global.empty:
+        return pd.DataFrame(columns=["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"])
+
+    tmp = _normalize_id_cols(df_num_global.copy())
+
+    # Asegurar columnas mínimas
+    _ensure_cols(tmp, ["CÓDIGO DE USUARIO","NOMBRE","CÉDULA","FECHA DE LECTURA"])
+    # Generar timestamp
+    tmp["__ts__"] = tmp["FECHA DE LECTURA"].apply(_to_ts)
+
+    # Si todas las fechas son NaT, intenta con PERIODO DE LECTURA
+    if tmp["__ts__"].isna().all() and "PERIODO DE LECTURA" in tmp.columns:
+        try:
+            tmp["__ts__"] = tmp["PERIODO DE LECTURA"].map(periodo_to_date)
+        except Exception:
+            pass  # si falla, se queda NaT y caeremos al plan B
+
+    # Si no hay “CÓDIGO DE USUARIO”, salimos con maestro vacío
+    if "CÓDIGO DE USUARIO" not in tmp.columns:
+        return pd.DataFrame(columns=["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"])
+
+    # Plan A: “más reciente por código” usando __ts__
+    last_recent = None
+    try:
+        if "__ts__" in tmp.columns and not tmp["__ts__"].isna().all():
+            idx_last = tmp.groupby("CÓDIGO DE USUARIO")["__ts__"].idxmax()
+            # Usa .filter para no fallar si alguna columna no está
+            last_recent = tmp.loc[idx_last].filter(items=["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"]).copy()
+    except Exception:
+        last_recent = None
+
+    # Plan B: si no hay timestamp utilizable, o falló el idxmax => usa “último no vacío”
+    nonempty = (
+        tmp.groupby("CÓDIGO DE USUARIO", as_index=False)
+           .agg({"NOMBRE": last_nonempty, "CÉDULA": last_nonempty})
+           .rename(columns={"NOMBRE":"NOMBRE_NE","CÉDULA":"CÉDULA_NE"})
+    )
+
+    if last_recent is None or last_recent.empty:
+        # solo con no-vacíos
+        master = nonempty.rename(columns={"NOMBRE_NE":"NOMBRE","CÉDULA_NE":"CÉDULA"})
+    else:
+        master = last_recent.merge(nonempty, on="CÓDIGO DE USUARIO", how="left")
+        # coalesce: preferimos el más reciente; si vacío, el “no vacío”
+        for col in ["NOMBRE","CÉDULA"]:
+            y = master[col].astype(str).str.strip()
+            x = master[f"{col}_NE"].astype(str).str.strip()
+            master[col] = y.where(y.ne("").fillna(False), x)
+            master.drop(columns=[f"{col}_NE"], inplace=True, errors="ignore")
+
+    master["NOMBRE"] = master["NOMBRE"].fillna("").astype(str).str.strip()
+    master["CÉDULA"] = master["CÉDULA"].fillna("").astype(str).str.strip()
+    master = master.drop_duplicates(subset=["CÓDIGO DE USUARIO"], keep="last")
+    return master[["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"]]
+
+def aplicar_maestro_a_reporte(df_reporte: pd.DataFrame, maestro: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rellena NOMBRE/CÉDULA en el reporte final por CÓDIGO DE USUARIO.
+    Nunca rompe si faltan columnas; crea vacías si hace falta.
+    """
+    if df_reporte is None or df_reporte.empty:
+        return df_reporte
+    out = df_reporte.copy()
+    out = _normalize_id_cols(out)
+
+    _ensure_cols(out, ["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"])
+    if maestro is None or maestro.empty:
+        return out
+
+    m = _normalize_id_cols(maestro.copy())
+    _ensure_cols(m, ["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"])
+
+    out = out.merge(m[["CÓDIGO DE USUARIO","NOMBRE","CÉDULA"]], on="CÓDIGO DE USUARIO", how="left", suffixes=("", "_M"))
+    # coalesce
+    for col in ["NOMBRE","CÉDULA"]:
+        base = out[col].astype(str).str.strip()
+        mstr = out[f"{col}_M"].astype(str).str.strip()
+        out[col] = base.where(base.ne("").fillna(False), mstr)
+        out.drop(columns=[f"{col}_M"], inplace=True, errors="ignore")
+    return out
+
+def recalcular_anuales_globales_por_codigo(df_reporte: pd.DataFrame, df_num_global: pd.DataFrame, umbral_pm: float = 0.005) -> pd.DataFrame:
+    """
+    Recalcula Hp(10/0.07/3) ANUAL y DE POR VIDA **a nivel global por CÓDIGO DE USUARIO**
+    usando df_num_global (sin filtro por cliente), y los reemplaza en el reporte final.
+    """
+    per_global = (
+        df_num_global.groupby("CÓDIGO DE USUARIO", as_index=False)
+        .agg({"_Hp10_NUM": "sum", "_Hp007_NUM": "sum", "_Hp3_NUM": "sum"})
+        .rename(columns={"_Hp10_NUM":"Hp (10) ANUAL","_Hp007_NUM":"Hp (0.07) ANUAL","_Hp3_NUM":"Hp (3) ANUAL"})
+    )
+    per_global["Hp (10) DE POR VIDA"]  = per_global["Hp (10) ANUAL"]
+    per_global["Hp (0.07) DE POR VIDA"] = per_global["Hp (0.07) ANUAL"]
+    per_global["Hp (3) DE POR VIDA"]    = per_global["Hp (3) ANUAL"]
+
+    out = df_reporte.merge(per_global, on="CÓDIGO DE USUARIO", how="left", suffixes=("", "_G"))
+    # Usar global si existe; si no, dejar lo que estaba
+    for c in ["Hp (10) ANUAL","Hp (0.07) ANUAL","Hp (3) ANUAL","Hp (10) DE POR VIDA","Hp (0.07) DE POR VIDA","Hp (3) DE POR VIDA"]:
+        cg = f"{c}_G"
+        if cg in out.columns:
+            # mostrar como PM si corresponde (coherente con pmfmt2)
+            out[c] = out[cg].map(lambda v: pmfmt2(v, umbral_pm))
+            out.drop(columns=[cg], inplace=True, errors="ignore")
+    return out
+
+def detectar_conflictos_identidad(df_base: pd.DataFrame) -> pd.DataFrame:
+    g = df_base.groupby("CÓDIGO DE USUARIO")
+    conflictos = []
+    for cod, d in g:
+        nombres = set(str(x).strip() for x in d["NOMBRE"].dropna() if str(x).strip() != "")
+        cedulas = set(str(x).strip() for x in d["CÉDULA"].dropna() if str(x).strip() != "")
+        if len(nombres) > 1 or len(cedulas) > 1:
+            conflictos.append({
+                "CÓDIGO DE USUARIO": cod,
+                "NOMBRES_DISTINTOS": sorted(nombres),
+                "CEDULAS_DISTINTAS": sorted(cedulas),
+                "OCURRENCIAS": len(d),
+            })
+    return pd.DataFrame(conflictos)
 
 # ============== UI: Tabs ==============
 tab1, tab2 = st.tabs(["1) Cargar y Subir a Ninox", "2) Reporte Final (sumas)"])
@@ -1154,6 +1340,9 @@ with tab2:
     if df_vista is None or df_vista.empty or df_num is None or df_num.empty:
         st.info("No hay datos para mostrar en el reporte final.")
     else:
+        # ========= CLAVE: conservar una copia GLOBAL antes de filtrar por cliente/periodos =========
+        df_num_global = df_num.copy()  # <-- se usará para ANUAL/VIDA global y maestro de NOMBRE/CÉDULA
+
         clientes = sorted([c for c in df_vista["CLIENTE"].dropna().unique().tolist() if str(c).strip()])
         cliente_filtro = None
         if clientes:
@@ -1176,6 +1365,19 @@ with tab2:
         if reporte.empty:
             st.info("No hay datos para el reporte con el filtro aplicado.")
         else:
+            # ========= NUEVO: recalcular ANUAL/VIDA por CÓDIGO global y rellenar NOMBRE/CÉDULA por maestro =========
+            maestro = construir_maestro_usuarios(df_num_global)
+            reporte = aplicar_maestro_a_reporte(reporte, maestro)
+            reporte = recalcular_anuales_globales_por_codigo(reporte, df_num_global, umbral_pm=0.005)
+
+            # (Opcional) mostrar conflictos de identidad por código
+            with st.expander("⚠️ Conflictos de identidad por código (si los hay)"):
+                conf = detectar_conflictos_identidad(df_num_global)
+                if conf.empty:
+                    st.caption("Sin conflictos detectados.")
+                else:
+                    st.dataframe(conf, use_container_width=True)
+
             st.dataframe(reporte, use_container_width=True)
 
             base = re.sub(r"[^A-Za-z0-9_\- ]+", "_", nombre_archivo_base.strip()) or "Reporte_Final"
@@ -1193,7 +1395,6 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
 
 
 
