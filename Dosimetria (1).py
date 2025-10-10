@@ -310,8 +310,9 @@ def leer_dosis(upload) -> Optional[pd.DataFrame]:
         else:
             df[dest] = pd.to_numeric(df[dest], errors="coerce").fillna(0.0)
 
+    # CORRECCIÓN: usar .str.strip() en lugar de .strip()
     if "dosimeter" in df.columns:
-        df["dosimeter"] = df["dosimeter"].astype(str).strip().str.upper()
+        df["dosimeter"] = df["dosimeter"].astype(str).str.strip().str.upper()
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     return df
@@ -1192,6 +1193,7 @@ with tab2:
                                data=excel_bytes,
                                file_name=f"{base}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 
 
 
